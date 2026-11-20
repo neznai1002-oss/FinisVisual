@@ -1,6 +1,6 @@
 --[[
-    Finis Visual v2.2 — 3D-интро "F" + 3D-Бекон + Самурайская шляпа + Шейдеры + Размер меню + Конфиги
-    Чисто визуальное меню и оформление интерфейса.
+    Finis Visual v2.3 — 3D-интро "F" + 3D-Бекон + Самурайская шляпа + Шейдеры
+    + Островок статуса + Защита от флинга (Anti-Fling / Anti-Void) + Конфиги
     Ключ для входа: @FinisOkek (регистр не важен)
 ]]
 
@@ -137,7 +137,7 @@ local PALETTE = {
 }
 F.PALETTE = PALETTE
 
--- значения по умолчанию (шляпа выключена при старте!)
+-- значения по умолчанию (шляпа выкл., островок и защита от флинга вкл.)
 local DEFAULT_STATE = {
     -- оформление 3D-превью Бекона
     prevBox      = true,
@@ -148,7 +148,7 @@ local DEFAULT_STATE = {
     chamsTrans   = 25,
     prevColorIdx = 2,
 
-    -- косметическая самурайская шляпа (выключена при запуске!)
+    -- косметическая самурайская шляпа (выключена при запуске)
     hatEnabled   = false,
     hatRgb       = false,
     hatSize      = 1.25,
@@ -169,11 +169,17 @@ local DEFAULT_STATE = {
     shBright     = 2.0,
     shBlur       = 0,
 
-    -- настройки самого меню и автосохранение
+    -- защита от флинга
+    antiFling    = true,
+    antiVoid     = true,
+
+    -- настройки меню, островок и автосохранение
     menuScale    = 1.0,
     panelOpacity = 88,
+    island       = true,
     autoSave     = true,
 }
+F.DEFAULT_STATE = DEFAULT_STATE
 
 local State = {}
 for k, v in pairs(DEFAULT_STATE) do State[k] = v end
@@ -386,9 +392,7 @@ do
 
     local function serializeState()
         local data = {}
-        for k in pairs(DEFAULT_STATE) do
-            data[k] = State[k]
-        end
+        for k in pairs(DEFAULT_STATE) do data[k] = State[k] end
         return HttpService:JSONEncode(data)
     end
 
@@ -405,14 +409,12 @@ do
                 State[k] = tbl[k]
             end
         end
-        -- синхронизируем все UI элементы
         for k in pairs(DEFAULT_STATE) do
             F.setState(k, State[k], true)
             if F.sliders[k] then F.sliders[k].set(State[k]) end
             if F.palettes[k] then F.palettes[k].set(State[k]) end
             if F.segments[k] then F.segments[k].set(State[k], true) end
         end
-        -- обновляем меню, 3D-превью и шейдеры
         F.applyScale(State.menuScale)
         F.applyOpac(State.panelOpacity)
         F.refreshPrev()
@@ -467,9 +469,7 @@ do
             if ok and type(files) == "table" then
                 for _, path in ipairs(files) do
                     local fname = string.match(path, "([^/\\]+)%.json$")
-                    if fname and fname ~= "_autosave" then
-                        map[fname] = true
-                    end
+                    if fname and fname ~= "_autosave" then map[fname] = true end
                 end
             end
         end
@@ -525,12 +525,10 @@ do
         F.saveAuto()
     end
 
-    -- автосохранение при выходе игрока с сервера
     F.bind(Players.PlayerRemoving, function(plr)
         if plr == LocalPlayer then F.saveAuto() end
     end)
 
-    -- загружаем прошлые настройки до построения UI
     F.loadAuto()
 end
 
@@ -540,6 +538,7 @@ end
 do
     local ICONS = {
         eye       = { {"p",true, 2,12, 5,8.5, 8.5,6.3, 12,5.5, 15.5,6.3, 19,8.5, 22,12, 19,15.5, 15.5,17.7, 12,18.5, 8.5,17.7, 5,15.5}, {"c",12,12,3} },
+        shield    = { {"p",true, 4,6, 11,3, 13,3, 20,6, 20,13, 17,18, 12,21.5, 7,18, 4,13} },
         folder    = { {"p",true, 3,5.5, 8.5,5.5, 10.5,8, 20,8, 21,9, 21,19, 20,20, 4,20, 3,19} },
         sliders   = { {"l",3,6,6,6}, {"l",11,6,21,6}, {"c",8.5,6,2.4}, {"l",3,12,13,12}, {"l",18,12,21,12}, {"c",15.5,12,2.4}, {"l",3,18,7,18}, {"l",12,18,21,18}, {"c",9.5,18,2.4} },
         save      = { {"p",true, 4,4, 17,4, 20,7, 20,20, 4,20}, {"p",false, 8,4, 8,9, 15,9, 15,4}, {"p",false, 7,20, 7,14, 17,14, 17,20} },
@@ -977,9 +976,118 @@ do
         return r
     end
 end
+----------------------------------------------------------------------
+-- МОДУЛЬ 1: ЗАЩИТА ОТ ФЛИНГА (ANTI-FLING + ANTI-VOID)
+----------------------------------------------------------------------
+do
+    local lastSafeCF = nil
+    local lastAlert = 0
+    local touchedParts = setmetatable({}, { __mode = "k" })
+
+    local function restoreOtherCollisions()
+        for part, origCanCollide in pairs(touchedParts) do
+            if part and part.Parent then
+                pcall(function() part.CanCollide = origCanCollide end)
+            end
+        end
+        table.clear(touchedParts)
+    end
+
+    local function zeroVelocity(char)
+        for _, obj in ipairs(char:GetDescendants()) do
+            if obj:IsA("BasePart") then
+                pcall(function()
+                    obj.AssemblyLinearVelocity = Vector3.zero
+                    obj.AssemblyAngularVelocity = Vector3.zero
+                end)
+            end
+        end
+    end
+
+    F.bindState("antiFling", function(v)
+        if not v then restoreOtherCollisions() end
+    end)
+
+    F.bind(RunService.Stepped, function()
+        local myChar = LocalPlayer.Character
+        local myRoot = myChar and (myChar:FindFirstChild("HumanoidRootPart") or myChar:FindFirstChild("Torso"))
+        local myHum  = myChar and myChar:FindFirstChildOfClass("Humanoid")
+
+        -- 1. Anti-Fling: убираем коллизию с другими игроками и гасим их бешеную скорость
+        if State.antiFling then
+            for _, plr in ipairs(Players:GetPlayers()) do
+                if plr ~= LocalPlayer and plr.Character then
+                    for _, part in ipairs(plr.Character:GetDescendants()) do
+                        if part:IsA("BasePart") then
+                            if part.CanCollide then
+                                if touchedParts[part] == nil then
+                                    touchedParts[part] = true
+                                end
+                                part.CanCollide = false
+                            end
+                            local lin = part.AssemblyLinearVelocity
+                            local ang = part.AssemblyAngularVelocity
+                            if lin.Magnitude > 95 or ang.Magnitude > 45 then
+                                part.AssemblyLinearVelocity = Vector3.zero
+                                part.AssemblyAngularVelocity = Vector3.zero
+                            end
+                        end
+                    end
+                end
+            end
+
+            -- защита твоего персонажа от резкого раскручивания или отлёта
+            if myRoot then
+                local lin = myRoot.AssemblyLinearVelocity
+                local ang = myRoot.AssemblyAngularVelocity
+                if ang.Magnitude > 40 then
+                    myRoot.AssemblyAngularVelocity = Vector3.zero
+                end
+                if lin.Magnitude > 145 then
+                    zeroVelocity(myChar)
+                    if lastSafeCF then
+                        myChar:PivotTo(lastSafeCF)
+                    end
+                    if os.clock() - lastAlert > 2 then
+                        lastAlert = os.clock()
+                        F.toast("Флинг заблокирован", "shield")
+                    end
+                end
+            end
+        end
+
+        -- 2. Запоминаем безопасную позицию и спасаем от вылета за карту (Anti-Void)
+        if myRoot and myHum and myHum.Health > 0 then
+            local fallY = -450
+            pcall(function()
+                if workspace.FallenPartsDestroyHeight and workspace.FallenPartsDestroyHeight > -1e9 then
+                    fallY = workspace.FallenPartsDestroyHeight
+                end
+            end)
+
+            local pos = myRoot.Position
+            local vel = myRoot.AssemblyLinearVelocity
+
+            if myHum.FloorMaterial ~= Enum.Material.Air and vel.Magnitude < 65 and pos.Y > (fallY + 30) then
+                lastSafeCF = myRoot.CFrame
+            end
+
+            if State.antiVoid and lastSafeCF and pos.Y < (fallY + 22) then
+                zeroVelocity(myChar)
+                myChar:PivotTo(lastSafeCF + Vector3.new(0, 3, 0))
+                if os.clock() - lastAlert > 2 then
+                    lastAlert = os.clock()
+                    F.toast("Возврат на карту (Anti-Void)", "shield")
+                end
+            end
+        end
+    end)
+
+    F.onCleanup(restoreOtherCollisions)
+end
 
 ----------------------------------------------------------------------
--- МОДУЛЬ 1: КОСМЕТИЧЕСКАЯ САМУРАЙСКАЯ ШЛЯПА (КАСА)
+-- МОДУЛЬ 2: КОСМЕТИЧЕСКАЯ САМУРАЙСКАЯ ШЛЯПА (КАСА)
 ----------------------------------------------------------------------
 do
     local HAT_LAYERS = 13
@@ -1044,7 +1152,7 @@ do
 end
 
 ----------------------------------------------------------------------
--- МОДУЛЬ 2: ШЕЙДЕРЫ (LIGHTING + 8 ПРЕСЕТОВ)
+-- МОДУЛЬ 3: ШЕЙДЕРЫ (LIGHTING + 8 ПРЕСЕТОВ)
 ----------------------------------------------------------------------
 do
     local Orig = {
@@ -1057,11 +1165,11 @@ do
         GlobalShadows        = Lighting.GlobalShadows,
         ExposureCompensation = Lighting.ExposureCompensation,
     }
-    DEFAULT_STATE.shClock  = math.floor(Orig.ClockTime * 2 + 0.5) / 2
-    DEFAULT_STATE.shBright = math.clamp(math.floor(Orig.Brightness * 10 + 0.5) / 10, 0.5, 5)
+    F.DEFAULT_STATE.shClock  = math.floor(Orig.ClockTime * 2 + 0.5) / 2
+    F.DEFAULT_STATE.shBright = math.clamp(math.floor(Orig.Brightness * 10 + 0.5) / 10, 0.5, 5)
     if State.shaderPreset == 1 then
-        State.shClock  = DEFAULT_STATE.shClock
-        State.shBright = DEFAULT_STATE.shBright
+        State.shClock  = F.DEFAULT_STATE.shClock
+        State.shBright = F.DEFAULT_STATE.shBright
     end
 
     local ShaderFX = {}
@@ -1135,7 +1243,7 @@ do
         if not p or p.reset then
             F.ResetShaders()
             State.shSat = 0; State.shContrast = 0; State.shBlur = 0
-            State.shClock = DEFAULT_STATE.shClock; State.shBright = DEFAULT_STATE.shBright
+            State.shClock = F.DEFAULT_STATE.shClock; State.shBright = F.DEFAULT_STATE.shBright
             F.setState("shBloom", false, true); F.setState("shSunRays", false, true); F.setState("shDof", false, true)
             for _, k in ipairs({ "shSat", "shContrast", "shClock", "shBright", "shBlur" }) do
                 if F.sliders[k] then F.sliders[k].set(State[k]) end
@@ -1180,7 +1288,7 @@ do
 end
 
 ----------------------------------------------------------------------
--- МОДУЛЬ 3: 3D-ПРЕВЬЮ БЕКОНА (ЧАМСЫ НА ВСЁ ТЕЛО + ШЛЯПА КАСА)
+-- МОДУЛЬ 4: 3D-ПРЕВЬЮ БЕКОНА (ЧАМСЫ НА ВСЁ ТЕЛО + ШЛЯПА КАСА)
 ----------------------------------------------------------------------
 function F.BuildBaconPreview(parent, x, y, w, h, isWinOpenFn)
     local card = F.Frame(parent, {
@@ -1416,6 +1524,80 @@ function F.BuildBaconPreview(parent, x, y, w, h, isWinOpenFn)
 end
 
 ----------------------------------------------------------------------
+-- МОДУЛЬ 5: ОСТРОВОК СТАТУСА (ВКЛЮЧЁН ПО УМОЛЧАНИЮ)
+----------------------------------------------------------------------
+function F.BuildStatusIsland()
+    local island = F.Frame(gui, {
+        Name = "StatusIsland",
+        AnchorPoint = V2(0.5, 0),
+        Position = UDim2.new(0.5, 0, 0, 12),
+        Size = off(322, 34),
+        BackgroundColor3 = rgb(16, 15, 34),
+        BackgroundTransparency = 0.14,
+        Visible = State.island,
+        ZIndex = 25,
+    })
+    F.Corner(island, "full")
+    F.Stroke(island, C.white, 0.84, 1)
+    local isScale = F.New("UIScale", { Scale = F.baseScale() }, island)
+
+    local dot = F.Frame(island, { AnchorPoint = V2(0, 0.5), Position = off(12, 17), Size = off(8, 8), BackgroundColor3 = C.green })
+    F.Corner(dot, "full")
+
+    F.Label(island, { Position = off(26, 0), Size = off(102, 34), Text = "Finis Visual", TextSize = 13, Font = F.FONT_B, TextColor3 = C.txt })
+    F.Frame(island, { AnchorPoint = V2(0, 0.5), Position = off(128, 17), Size = off(1, 14), BackgroundTransparency = 0.82 })
+
+    local fpsLbl = F.Label(island, { Position = off(138, 0), Size = off(66, 34), Text = "60 FPS", TextSize = 12.5, Font = F.FONT_M, TextColor3 = C.a })
+    F.Frame(island, { AnchorPoint = V2(0, 0.5), Position = off(204, 17), Size = off(1, 14), BackgroundTransparency = 0.82 })
+
+    local timeLbl = F.Label(island, { Position = off(214, 0), Size = off(62, 34), Text = "00:00", TextSize = 12.5, Font = F.FONT_M, TextColor3 = C.txt2 })
+    F.Frame(island, { AnchorPoint = V2(0, 0.5), Position = off(276, 17), Size = off(1, 14), BackgroundTransparency = 0.82 })
+
+    -- индикатор щита Anti-Fling на островке
+    local shieldIc = F.Icon(island, "shield", 15, State.antiFling and C.green or C.txt4, { Position = off(290, 9.5) })
+    F.bindState("antiFling", function(v, instant)
+        F.setIconColor(shieldIc, v and C.green or C.txt4, instant)
+    end)
+
+    F.bindState("island", function(v, instant)
+        if v then
+            island.Visible = true
+            if instant then
+                island.Position = UDim2.new(0.5, 0, 0, 12)
+            else
+                island.Position = UDim2.new(0.5, 0, 0, -44)
+                F.tw(island, 0.35, { Position = UDim2.new(0.5, 0, 0, 12) }, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+            end
+        else
+            if instant then
+                island.Visible = false
+            else
+                F.tw(island, 0.25, { Position = UDim2.new(0.5, 0, 0, -44) }, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+                task.delay(0.27, function()
+                    if not State.island then island.Visible = false end
+                end)
+            end
+        end
+    end)
+
+    F.bind(gui:GetPropertyChangedSignal("AbsoluteSize"), function()
+        isScale.Scale = F.baseScale()
+    end)
+
+    local t0, acc, fpsEst = os.clock(), 0, 60
+    F.bind(RunService.Heartbeat, function(dt)
+        if dt > 0 then fpsEst = fpsEst * 0.9 + (1 / dt) * 0.1 end
+        acc = acc + dt
+        if acc >= 0.5 then
+            acc = 0
+            fpsLbl.Text = tostring(math.floor(math.min(fpsEst, 999) + 0.5)) .. " FPS"
+            local elapsed = math.floor(os.clock() - t0)
+            timeLbl.Text = string.format("%02d:%02d", math.floor(elapsed / 60) % 100, elapsed % 60)
+        end
+    end)
+end
+
+----------------------------------------------------------------------
 -- ВКЛАДКА 1: ВИЗУАЛ (3D-БЕКОН + ШЛЯПА КАСА + ШЕЙДЕРЫ)
 ----------------------------------------------------------------------
 function F.BuildVisualPage(page, isWinOpenFn)
@@ -1503,20 +1685,25 @@ function F.BuildVisualPage(page, isWinOpenFn)
 end
 
 ----------------------------------------------------------------------
--- ВКЛАДКА 2: МЕНЮ И КОНФИГИ (РАЗМЕР МЕНЮ + СОХРАНЕНИЕ)
+-- ВКЛАДКА 2: МЕНЮ, ЗАЩИТА ОТ ФЛИНГА И КОНФИГИ
 ----------------------------------------------------------------------
 function F.BuildConfigPage(page)
     local s = page.scroller
-    F.Label(s, { Position = off(26, 12), Size = off(460, 38), Text = "Меню и Конфиги", TextSize = 28, Font = F.FONT_B, TextColor3 = rgb(236, 230, 255) })
-    F.Label(s, { Position = off(26, 50), Size = off(560, 22), Text = "Размер интерфейса, автосохранение при выходе и профили настроек", TextSize = 13.5, TextColor3 = C.txt2 })
+    F.Label(s, { Position = off(26, 12), Size = off(480, 38), Text = "Меню и Конфиги", TextSize = 28, Font = F.FONT_B, TextColor3 = rgb(236, 230, 255) })
+    F.Label(s, { Position = off(26, 50), Size = off(580, 22), Text = "Защита от флинга, островок статуса, размер интерфейса и конфиги", TextSize = 13.5, TextColor3 = C.txt2 })
 
     local LX, RX, COLW = 26, 422, 372
     local L = F.newColumn(s, LX, 90, COLW)
     local R = F.newColumn(s, RX, 90, COLW)
 
-    -- ЛЕВАЯ КОЛОНКА: Размер меню и автосохранение
-    L:header("Размер и вид меню", "sliders", "Под любой экран")
+    -- ЛЕВАЯ КОЛОНКА: Защита от флинга + Размер меню + Островок + Автосохранение
+    L:header("Защита от флинга", "shield", "Активна")
+    L:toggle("antiFling", "Защита от флинга", "Убирает столкновения с игроками и гасит чужие удары", function(v)
+        F.toast(v and "Защита от флинга включена" or "Защита от флинга выключена", "shield")
+    end)
+    L:toggle("antiVoid", "Защита от падения (Anti-Void)", "Возвращает обратно на карту, если всё-таки вытолкнули")
 
+    L:header("Размер и вид меню", "sliders", "Под любой экран", 12)
     local sizeVals = { 0.75, 1.0, 1.25 }
     local initPreset = (State.menuScale <= 0.85 and 1) or (State.menuScale >= 1.15 and 3) or 2
     L:segment(nil, "Быстрый размер", { "Маленькое", "Среднее", "Большое" }, initPreset, function(i)
@@ -1538,6 +1725,8 @@ function F.BuildConfigPage(page)
         fmt = function(v) return string.format("%d%%", v) end,
         onChange = function(v) F.applyOpac(v) end,
     })
+
+    L:toggle("island", "Островок статуса", "Стеклянная плашка сверху экрана (FPS, аптайм, щит)")
 
     L:header("Сохранение", "save", "Авто + сброс", 12)
     L:toggle("autoSave", "Автосохранение", "Сохраняет все настройки автоматически и при выходе", function(v)
@@ -1912,7 +2101,7 @@ local function BuildShell()
     -- Боковая панель (2 вкладки: Визуал и Конфиги)
     local side = F.Frame(body, { Name = "Sidebar", BackgroundTransparency = 1, Position = off(0, HEAD_H), Size = off(SIDE_W, PAGE_H) })
     F.Frame(body, { Position = off(SIDE_W - 1, HEAD_H), Size = off(1, PAGE_H), BackgroundTransparency = 0.93 })
-    F.Label(side, { Position = off(20, PAGE_H - 36), Size = off(150, 14), Text = "FINIS VISUAL  ·  v2.2", TextSize = 9.5, TextColor3 = C.txt4 })
+    F.Label(side, { Position = off(20, PAGE_H - 36), Size = off(150, 14), Text = "FINIS VISUAL  ·  v2.3", TextSize = 9.5, TextColor3 = C.txt4 })
 
     local NAV = {
         { id = "visual",  title = "Визуал",  icon = "eye" },
@@ -2021,11 +2210,10 @@ local function BuildShell()
         else F.scrolled = false end
     end)
 
-    -- Собираем обе вкладки
+    -- Собираем вкладки и применяем сохранённые шейдеры
     table.clear(F.searchItems)
     F.BuildVisualPage(createPage("visual"), function() return winOpen end)
     F.BuildConfigPage(createPage("configs"))
-    -- применяем сохранённые шейдеры после автозагрузки
     F.ApplySavedShaders()
 
     -- Уголок масштаба + частицы
@@ -2156,7 +2344,7 @@ local function BuildShell()
         keyBox.TextTransparency = 1 - a; keyBox.PlaceholderText = (a > 0.6) and "Ваш ключ" or ""
         F.setIconAlpha(inIcon, a)
     end
-    F.Label(cardBody, { Position = off(0, 396), Size = off(CARD_W, 16), Text = "FINIS VISUAL  ·  v2.2", TextSize = 9.5, TextColor3 = C.txt4, TextXAlignment = Enum.TextXAlignment.Center })
+    F.Label(cardBody, { Position = off(0, 396), Size = off(CARD_W, 16), Text = "FINIS VISUAL  ·  v2.3", TextSize = 9.5, TextColor3 = C.txt4, TextXAlignment = Enum.TextXAlignment.Center })
 
     local pasteWrap = F.Group(cardBody, { Position = off(35, 306), Size = off(141, 52) })
     F.MakeButton(pasteWrap, 0, 0, 141, 52, "Вставить", "clipboard", "ghost", function()
@@ -2305,6 +2493,7 @@ local function BuildShell()
     end)
 
     gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(applyScales)
+    F.BuildStatusIsland()
     F.RunIntro3DF(orb, orbScale, getOrbTargetPos)
 end
 
