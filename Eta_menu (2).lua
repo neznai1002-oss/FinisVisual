@@ -1,6 +1,6 @@
 --[[
-    Finis Visual — чисто визуальное меню (Delta / Roblox)
-    3D-интро "F" + 3D-Бекон (чамсы на всё тело) + Самурайская шляпа (Каса) + Шейдеры
+    Finis Visual v2.2 — 3D-интро "F" + 3D-Бекон + Самурайская шляпа + Шейдеры + Размер меню + Конфиги
+    Чисто визуальное меню и оформление интерфейса.
     Ключ для входа: @FinisOkek (регистр не важен)
 ]]
 
@@ -12,11 +12,12 @@ local TextService      = game:GetService("TextService")
 local GuiService       = game:GetService("GuiService")
 local StarterGui       = game:GetService("StarterGui")
 local Lighting         = game:GetService("Lighting")
+local HttpService      = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 local ENV = (type(getgenv) == "function" and getgenv()) or _G
 
--- удаляем предыдущую копию при повторном запуске
+-- удаляем старую копию при перезапуске
 if ENV.__FinisVisual and type(ENV.__FinisVisual.Destroy) == "function" then
     pcall(ENV.__FinisVisual.Destroy)
 end
@@ -24,20 +25,27 @@ if ENV.__EtaMenu and type(ENV.__EtaMenu.Destroy) == "function" then
     pcall(ENV.__EtaMenu.Destroy)
 end
 
--- единая таблица приложения (убирает ошибку лимита upvalues!)
+-- общая таблица состояния и модулей (исключает переполнение upvalues)
 local F = {
     conns       = {},
     cleanups    = {},
     sparks      = {},
     searchItems = {},
     binders     = {},
+    sliders     = {},
+    segments    = {},
+    palettes    = {},
     scrolled    = false,
     toast       = function() end,
     pressFx     = function() end,
     scrollLock  = function() end,
     orbTap      = function() end,
+    applyScale  = function() end,
+    applyOpac   = function() end,
+    refreshPrev = function() end,
 }
 ENV.__FinisVisual = F
+ENV.__FinisVisualMemCfg = ENV.__FinisVisualMemCfg or {}
 
 function F.bind(signal, fn)
     local c = signal:Connect(fn)
@@ -50,7 +58,7 @@ function F.onCleanup(fn)
 end
 
 ----------------------------------------------------------------------
--- ScreenGui (CoreGui приоритетно для стабильного 3D ViewportFrame в Delta)
+-- ScreenGui (CoreGui приоритетно для стабильного 3D ViewportFrame)
 ----------------------------------------------------------------------
 local gui = Instance.new("ScreenGui")
 gui.Name = "FinisVisualMenu"
@@ -74,6 +82,7 @@ end
 F.gui = gui
 
 function F.Destroy()
+    if F.saveAuto then pcall(F.saveAuto) end
     for _, fn in ipairs(F.cleanups) do pcall(fn) end
     F.cleanups = {}
     for _, c in ipairs(F.conns) do pcall(function() c:Disconnect() end) end
@@ -128,8 +137,9 @@ local PALETTE = {
 }
 F.PALETTE = PALETTE
 
-local State = {
-    -- чисто визуальные настройки 3D-превью Бекона
+-- значения по умолчанию (шляпа выключена при старте!)
+local DEFAULT_STATE = {
+    -- оформление 3D-превью Бекона
     prevBox      = true,
     prevNick     = true,
     prevDist     = true,
@@ -137,17 +147,15 @@ local State = {
     chamsMode    = 1, -- 1=Обычный, 2=Glow, 3=Flat, 4=Glass
     chamsTrans   = 25,
     prevColorIdx = 2,
-    prevColor    = PALETTE[2],
 
-    -- косметическая самурайская шляпа (Каса)
-    hatEnabled   = true,
+    -- косметическая самурайская шляпа (выключена при запуске!)
+    hatEnabled   = false,
     hatRgb       = false,
     hatSize      = 1.25,
     hatHeight    = 0.55,
     hatTrans     = 15,
-    hatMat       = 1, -- 1=Neon, 2=Glass, 3=Flat, 4=Field
+    hatMat       = 1,
     hatColorIdx  = 1,
-    hatColor     = PALETTE[1],
 
     -- шейдеры (Lighting)
     shaderPreset = 1,
@@ -160,8 +168,19 @@ local State = {
     shClock      = 14.0,
     shBright     = 2.0,
     shBlur       = 0,
+
+    -- настройки самого меню и автосохранение
+    menuScale    = 1.0,
+    panelOpacity = 88,
+    autoSave     = true,
 }
+
+local State = {}
+for k, v in pairs(DEFAULT_STATE) do State[k] = v end
 F.State = State
+
+function F.getPrevColor() return PALETTE[State.prevColorIdx] or PALETTE[2] end
+function F.getHatColor()  return PALETTE[State.hatColorIdx]  or PALETTE[1] end
 
 function F.bindState(key, fn)
     F.binders[key] = F.binders[key] or {}
@@ -169,11 +188,14 @@ function F.bindState(key, fn)
     fn(State[key], true)
 end
 
-function F.setState(key, v)
+function F.setState(key, v, skipAutoSave)
     State[key] = v
     local list = F.binders[key]
     if list then
-        for _, fn in ipairs(list) do fn(v, false) end
+        for _, fn in ipairs(list) do pcall(fn, v, false) end
+    end
+    if not skipAutoSave and State.autoSave and F.scheduleAutoSave then
+        F.scheduleAutoSave()
     end
 end
 
@@ -313,7 +335,7 @@ function F.measureH(text, size, font, w)
     return math.ceil((utf8.len(text) or #text) * size * 0.58 / w) * size * 1.25
 end
 
--- единый обработчик перетаскивания
+-- единое перетаскивание
 F.Drag = { move = nil, finish = nil }
 function F.beginDrag(move, finish)
     if F.Drag.finish then pcall(F.Drag.finish) end
@@ -340,11 +362,189 @@ function F.isPress(input)
 end
 
 ----------------------------------------------------------------------
+-- СИСТЕМА КОНФИГОВ И АВТОСОХРАНЕНИЯ (ФАЙЛЫ + РЕЗЕРВ В ПАМЯТИ)
+----------------------------------------------------------------------
+do
+    local CFG_DIR = "FinisVisualConfigs"
+    local AUTO_FILE = CFG_DIR .. "/_autosave.json"
+    local hasFS = (type(writefile) == "function" and type(readfile) == "function")
+
+    local function ensureDir()
+        if not hasFS then return end
+        pcall(function()
+            if type(isfolder) == "function" and type(makefolder) == "function" then
+                if not isfolder(CFG_DIR) then makefolder(CFG_DIR) end
+            end
+        end)
+    end
+
+    local function sanitizeName(name)
+        name = F.trim(tostring(name or ""))
+        name = string.gsub(name, "[^%w%-%_%sА-Яа-яЁё]", "")
+        return F.trim(name)
+    end
+
+    local function serializeState()
+        local data = {}
+        for k in pairs(DEFAULT_STATE) do
+            data[k] = State[k]
+        end
+        return HttpService:JSONEncode(data)
+    end
+
+    local function decodeState(raw)
+        local ok, tbl = pcall(function() return HttpService:JSONDecode(raw) end)
+        if ok and type(tbl) == "table" then return tbl end
+        return nil
+    end
+
+    function F.applyLoadedData(tbl)
+        if type(tbl) ~= "table" then return end
+        for k, defVal in pairs(DEFAULT_STATE) do
+            if tbl[k] ~= nil and type(tbl[k]) == type(defVal) then
+                State[k] = tbl[k]
+            end
+        end
+        -- синхронизируем все UI элементы
+        for k in pairs(DEFAULT_STATE) do
+            F.setState(k, State[k], true)
+            if F.sliders[k] then F.sliders[k].set(State[k]) end
+            if F.palettes[k] then F.palettes[k].set(State[k]) end
+            if F.segments[k] then F.segments[k].set(State[k], true) end
+        end
+        -- обновляем меню, 3D-превью и шейдеры
+        F.applyScale(State.menuScale)
+        F.applyOpac(State.panelOpacity)
+        F.refreshPrev()
+        if F.ApplySavedShaders then F.ApplySavedShaders() end
+    end
+
+    function F.saveConfig(name)
+        name = sanitizeName(name)
+        if name == "" then return false, "Введи название конфига" end
+        local raw = serializeState()
+        ENV.__FinisVisualMemCfg[name] = raw
+        if hasFS then
+            ensureDir()
+            pcall(writefile, CFG_DIR .. "/" .. name .. ".json", raw)
+        end
+        return true, name
+    end
+
+    function F.loadConfig(name)
+        local raw = ENV.__FinisVisualMemCfg[name]
+        if hasFS and type(isfile) == "function" then
+            local path = CFG_DIR .. "/" .. name .. ".json"
+            local okEx, exists = pcall(isfile, path)
+            if okEx and exists then
+                local okR, content = pcall(readfile, path)
+                if okR and type(content) == "string" then raw = content end
+            end
+        end
+        if not raw then return false end
+        local tbl = decodeState(raw)
+        if not tbl then return false end
+        F.applyLoadedData(tbl)
+        if State.autoSave then F.saveAuto() end
+        return true
+    end
+
+    function F.deleteConfig(name)
+        ENV.__FinisVisualMemCfg[name] = nil
+        if hasFS and type(delfile) == "function" then
+            pcall(delfile, CFG_DIR .. "/" .. name .. ".json")
+        end
+    end
+
+    function F.listConfigs()
+        local map, out = {}, {}
+        for name in pairs(ENV.__FinisVisualMemCfg) do
+            if name ~= "_autosave" then map[name] = true end
+        end
+        if hasFS and type(listfiles) == "function" then
+            ensureDir()
+            local ok, files = pcall(listfiles, CFG_DIR)
+            if ok and type(files) == "table" then
+                for _, path in ipairs(files) do
+                    local fname = string.match(path, "([^/\\]+)%.json$")
+                    if fname and fname ~= "_autosave" then
+                        map[fname] = true
+                    end
+                end
+            end
+        end
+        for name in pairs(map) do out[#out + 1] = name end
+        table.sort(out)
+        return out
+    end
+
+    function F.saveAuto()
+        if not State.autoSave then return end
+        local raw = serializeState()
+        ENV.__FinisVisualMemCfg["_autosave"] = raw
+        if hasFS then
+            ensureDir()
+            pcall(writefile, AUTO_FILE, raw)
+        end
+    end
+
+    function F.loadAuto()
+        local raw = ENV.__FinisVisualMemCfg["_autosave"]
+        if hasFS and type(isfile) == "function" then
+            local okEx, exists = pcall(isfile, AUTO_FILE)
+            if okEx and exists then
+                local okR, content = pcall(readfile, AUTO_FILE)
+                if okR and type(content) == "string" then raw = content end
+            end
+        end
+        if not raw then return false end
+        local tbl = decodeState(raw)
+        if not tbl then return false end
+        for k, defVal in pairs(DEFAULT_STATE) do
+            if tbl[k] ~= nil and type(tbl[k]) == type(defVal) then
+                State[k] = tbl[k]
+            end
+        end
+        return true
+    end
+
+    local saveToken = 0
+    function F.scheduleAutoSave()
+        saveToken = saveToken + 1
+        local tok = saveToken
+        task.delay(0.35, function()
+            if tok == saveToken then F.saveAuto() end
+        end)
+    end
+
+    function F.resetAllToDefaults()
+        local copy = {}
+        for k, v in pairs(DEFAULT_STATE) do copy[k] = v end
+        F.applyLoadedData(copy)
+        if F.ResetShaders then F.ResetShaders() end
+        F.saveAuto()
+    end
+
+    -- автосохранение при выходе игрока с сервера
+    F.bind(Players.PlayerRemoving, function(plr)
+        if plr == LocalPlayer then F.saveAuto() end
+    end)
+
+    -- загружаем прошлые настройки до построения UI
+    F.loadAuto()
+end
+
+----------------------------------------------------------------------
 -- векторные иконки + логотип F
 ----------------------------------------------------------------------
 do
     local ICONS = {
         eye       = { {"p",true, 2,12, 5,8.5, 8.5,6.3, 12,5.5, 15.5,6.3, 19,8.5, 22,12, 19,15.5, 15.5,17.7, 12,18.5, 8.5,17.7, 5,15.5}, {"c",12,12,3} },
+        folder    = { {"p",true, 3,5.5, 8.5,5.5, 10.5,8, 20,8, 21,9, 21,19, 20,20, 4,20, 3,19} },
+        sliders   = { {"l",3,6,6,6}, {"l",11,6,21,6}, {"c",8.5,6,2.4}, {"l",3,12,13,12}, {"l",18,12,21,12}, {"c",15.5,12,2.4}, {"l",3,18,7,18}, {"l",12,18,21,18}, {"c",9.5,18,2.4} },
+        save      = { {"p",true, 4,4, 17,4, 20,7, 20,20, 4,20}, {"p",false, 8,4, 8,9, 15,9, 15,4}, {"p",false, 7,20, 7,14, 17,14, 17,20} },
+        trash     = { {"l",3.5,6,20.5,6}, {"p",false, 8.5,6, 8.5,3.5, 15.5,3.5, 15.5,6}, {"p",true, 5.5,6, 6.5,20.5, 17.5,20.5, 18.5,6}, {"l",10,10,10,16.5}, {"l",14,10,14,16.5} },
+        pencil    = { {"p",true, 3.5,20.5, 4.5,15.5, 15.5,4.5, 19.5,8.5, 8.5,19.5}, {"l",13,7,17,11} },
         x         = { {"l",6,6,18,18}, {"l",18,6,6,18} },
         check     = { {"p",false, 5,12.5, 10,17.5, 19,7} },
         arrow     = { {"l",4,12,20,12}, {"p",false, 14,6, 20,12, 14,18} },
@@ -558,6 +758,7 @@ do
             F.beginDrag(function(i) setFromX(i.Position.X) end, function()
                 F.scrollLock(false)
                 F.tw(thumb, 0.2, { Size = off(2*R, 2*R) }, Quad, Out)
+                if State.autoSave then F.scheduleAutoSave() end
             end)
         end)
 
@@ -582,19 +783,11 @@ do
         end
         function obj.set(i, instant)
             obj.selected = i
-            if i == nil or i < 1 then
-                pill.Visible = false
-                paint(0, true)
-                return
-            end
+            if i == nil or i < 1 then pill.Visible = false; paint(0, true); return end
             local goal = off(pad + (i - 1) * segW, pad)
-            if not pill.Visible then
-                pill.Position = goal; pill.Visible = true
-            elseif instant then
-                pill.Position = goal
-            else
-                F.tw(pill, 0.3, { Position = goal }, Quint, Out)
-            end
+            if not pill.Visible then pill.Position = goal; pill.Visible = true
+            elseif instant then pill.Position = goal
+            else F.tw(pill, 0.3, { Position = goal }, Quint, Out) end
             paint(i, instant)
         end
         for i, name in ipairs(options) do
@@ -604,6 +797,7 @@ do
                 if F.scrolled then return end
                 F.pressFx(b); obj.set(i, false)
                 if onSelect then onSelect(i, name) end
+                if State.autoSave then F.scheduleAutoSave() end
             end)
         end
         obj.set(selected, true)
@@ -615,12 +809,13 @@ do
         F.Corner(root, 14)
         local fg = C.txt
         if style == "primary" then F.accent(root, 0); fg = C.dark
+        elseif style == "danger" then root.BackgroundColor3 = rgb(210, 56, 86); root.BackgroundTransparency = 0.25; fg = C.white
         else root.BackgroundColor3 = rgb(72, 72, 104); root.BackgroundTransparency = 0.72; F.Stroke(root, C.white, 0.88, 1) end
-        local twd = F.measure(text, 15, F.FONT_B)
-        local iw, gap = iconName and 17 or 0, iconName and 8 or 0
+        local twd = F.measure(text, 14.5, F.FONT_B)
+        local iw, gap = iconName and 16 or 0, iconName and 7 or 0
         local sx = (w - (iw + gap + twd)) / 2
-        if iconName then F.Icon(root, iconName, 17, fg, { Position = off(sx, (h - 17) / 2) }) end
-        F.Label(root, { Position = off(sx + iw + gap, 0), Size = off(twd + 6, h), Text = text, TextSize = 15, Font = F.FONT_B, TextColor3 = fg })
+        if iconName then F.Icon(root, iconName, 16, fg, { Position = off(sx, (h - 16) / 2) }) end
+        F.Label(root, { Position = off(sx + iw + gap, 0), Size = off(twd + 6, h), Text = text, TextSize = 14.5, Font = F.FONT_B, TextColor3 = fg })
         local btn = F.Button(root, { ZIndex = 3 })
         F.addPress(btn, root, 0.97)
         btn.Activated:Connect(function()
@@ -642,6 +837,7 @@ do
             if F.scrolled then return end
             F.pressFx(root)
             if onClick then onClick() end
+            if State.autoSave then F.scheduleAutoSave() end
         end)
         return { set = function(v) F.tw(rs, 0.2, { Transparency = v and 0.1 or 1 }) end }
     end
@@ -740,30 +936,36 @@ do
         local userCb = cfg.onChange
         cfg.onChange = function(v) State[key] = v; if userCb then userCb(v) end end
         local s = F.Slider(r, 0, (desc and 42 or 28) + extra, self.w, cfg)
+        F.sliders[key] = s
         table.insert(F.searchItems, { row = r, text = string.lower(title .. " " .. (desc or "")) })
         return r, s
     end
 
-    function Column:segment(label, options, selected, onSelect, opts)
+    function Column:segment(key, label, options, selected, onSelect, opts)
         local h = label and 74 or 50
         local r = self:row(h, opts)
         if label then F.Label(r, { Position = off(0, 2), Size = off(self.w, 20), Text = label, TextSize = 15 }) end
         local seg = F.Segmented(r, 0, label and 28 or 6, self.w, options, selected, onSelect)
+        if key then F.segments[key] = seg end
         if label then table.insert(F.searchItems, { row = r, text = string.lower(label) }) end
         return r, seg
     end
 
-    function Column:palette(label, selectedIdx, onPick, opts)
+    function Column:palette(key, label, selectedIdx, onPick, opts)
         local r = self:row(72, opts)
         F.Label(r, { Position = off(0, 4), Size = off(self.w, 20), Text = label, TextSize = 15 })
         local sw = {}
         local step = (self.w - 26) / (#PALETTE - 1)
+        local function selectIdx(idx)
+            for j, o in ipairs(sw) do o.set(j == idx) end
+        end
         for i, col in ipairs(PALETTE) do
             sw[i] = F.Swatch(r, (i - 1) * step, 34, 26, col, i == selectedIdx, function()
-                for j, o in ipairs(sw) do o.set(j == i) end
+                selectIdx(i)
                 if onPick then onPick(i, col) end
             end)
         end
+        if key then F.palettes[key] = { set = selectIdx } end
         table.insert(F.searchItems, { row = r, text = string.lower(label) })
         return r
     end
@@ -781,12 +983,7 @@ end
 ----------------------------------------------------------------------
 do
     local HAT_LAYERS = 13
-    local HAT_MATS = {
-        Enum.Material.Neon,
-        Enum.Material.Glass,
-        Enum.Material.SmoothPlastic,
-        Enum.Material.ForceField,
-    }
+    local HAT_MATS = { Enum.Material.Neon, Enum.Material.Glass, Enum.Material.SmoothPlastic, Enum.Material.ForceField }
 
     function F.CreateSamuraiHat(parent, name)
         local folder = F.New("Folder", { Name = name or "SamuraiHat" }, parent)
@@ -796,39 +993,37 @@ do
                 Name = "Ring_" .. i, Shape = Enum.PartType.Cylinder,
                 Anchored = true, CanCollide = false, CanTouch = false, CanQuery = false, CastShadow = false,
                 TopSurface = Enum.SurfaceType.Smooth, BottomSurface = Enum.SurfaceType.Smooth,
-                Material = Enum.Material.Neon, Size = Vector3.new(0.08, 2, 2),
+                Material = Enum.Material.Neon, Size = Vector3.new(0.08, 2, 2), Transparency = 1,
             }, folder)
         end
         local tip = F.New("Part", {
             Name = "Tip", Shape = Enum.PartType.Ball,
             Anchored = true, CanCollide = false, CanTouch = false, CanQuery = false, CastShadow = false,
-            Material = Enum.Material.Neon, Size = Vector3.new(0.2, 0.2, 0.2),
+            Material = Enum.Material.Neon, Size = Vector3.new(0.2, 0.2, 0.2), Transparency = 1,
         }, folder)
         return { folder = folder, layers = layers, tip = tip }
     end
 
     function F.UpdateSamuraiHat(hat, headCF, enabled, sizeScale, heightOff, transPct, col, matIdx, spinAngle)
         if not hat or not hat.folder or not hat.folder.Parent then return end
-        local mat = HAT_MATS[matIdx] or Enum.Material.Neon
-        local baseTrans = math.clamp(transPct / 100, 0, 0.96)
-        local baseR = 2.55 * sizeScale
-        local totalH = 0.92 * sizeScale
-        local stepH = totalH / HAT_LAYERS
-
         if not enabled or not headCF then
             for _, p in ipairs(hat.layers) do p.Transparency = 1 end
             hat.tip.Transparency = 1
             return
         end
 
+        local mat = HAT_MATS[matIdx] or Enum.Material.Neon
+        local baseTrans = math.clamp(transPct / 100, 0, 0.96)
+        local baseR = 2.55 * sizeScale
+        local totalH = 0.92 * sizeScale
+        local stepH = totalH / HAT_LAYERS
         local baseCF = headCF * CFrame.new(0, heightOff, 0) * CFrame.Angles(0, spinAngle or 0, 0)
+
         for i, p in ipairs(hat.layers) do
             local t = (i - 1) / (HAT_LAYERS - 1)
             local radius = math.max(0.14, baseR * ((1 - t) ^ 0.88))
-            local y = t * totalH
-            local thick = math.max(0.05, stepH * 1.35)
-            p.Size = Vector3.new(thick, radius * 2, radius * 2)
-            p.CFrame = baseCF * CFrame.new(0, y, 0) * CFrame.Angles(0, 0, math.rad(90))
+            p.Size = Vector3.new(math.max(0.05, stepH * 1.35), radius * 2, radius * 2)
+            p.CFrame = baseCF * CFrame.new(0, t * totalH, 0) * CFrame.Angles(0, 0, math.rad(90))
             p.Material = mat
             local shade = 0.72 + 0.28 * (1 - t)
             p.Color = Color3.new(col.R * shade, col.G * shade, col.B * shade)
@@ -849,7 +1044,7 @@ do
 end
 
 ----------------------------------------------------------------------
--- МОДУЛЬ 2: ШЕЙДЕРЫ (LIGHTING + ПОСТ-ЭФФЕКТЫ С ВОЗВРАТОМ ОРИГИНАЛА)
+-- МОДУЛЬ 2: ШЕЙДЕРЫ (LIGHTING + 8 ПРЕСЕТОВ)
 ----------------------------------------------------------------------
 do
     local Orig = {
@@ -862,8 +1057,12 @@ do
         GlobalShadows        = Lighting.GlobalShadows,
         ExposureCompensation = Lighting.ExposureCompensation,
     }
-    State.shClock  = math.floor(Orig.ClockTime * 2 + 0.5) / 2
-    State.shBright = math.clamp(math.floor(Orig.Brightness * 10 + 0.5) / 10, 0.5, 5)
+    DEFAULT_STATE.shClock  = math.floor(Orig.ClockTime * 2 + 0.5) / 2
+    DEFAULT_STATE.shBright = math.clamp(math.floor(Orig.Brightness * 10 + 0.5) / 10, 0.5, 5)
+    if State.shaderPreset == 1 then
+        State.shClock  = DEFAULT_STATE.shClock
+        State.shBright = DEFAULT_STATE.shBright
+    end
 
     local ShaderFX = {}
     local function getFX(cls, name)
@@ -887,7 +1086,17 @@ do
         { name = "Зима",       clock = 10.5, bright = 2.5, exposure = 0.12, ambient = rgb(126,160,202), outdoor = rgb(156,192,232), top = rgb(208,236,255), tint = rgb(220,240,255), bloom = true, bloomInt = 0.85, sun = true, dof = false, sat = -0.08, contrast = 0.1, blur = 0 },
         { name = "Vaporwave",  clock = 18.4, bright = 2.3, exposure = 0.20, ambient = rgb(156,76,166), outdoor = rgb(98,176,212), top = rgb(255,128,214), tint = rgb(252,210,245), bloom = true, bloomInt = 1.25, sun = true, dof = false, sat = 0.42, contrast = 0.2, blur = 0 },
     }
-    F.ShaderSliders = {}
+    F.shaderSeg1, F.shaderSeg2 = nil, nil
+
+    local function syncShaderSegs(idx)
+        if F.shaderSeg1 and F.shaderSeg2 then
+            if idx <= 4 then
+                F.shaderSeg1.set(idx, true); F.shaderSeg2.set(nil, true)
+            else
+                F.shaderSeg1.set(nil, true); F.shaderSeg2.set(idx - 4, true)
+            end
+        end
+    end
 
     function F.ResetShaders()
         for _, fxObj in pairs(ShaderFX) do pcall(function() fxObj:Destroy() end) end
@@ -921,37 +1130,49 @@ do
 
     function F.ApplyShaderPreset(idx)
         State.shaderPreset = idx
+        syncShaderSegs(idx)
         local p = F.SHADER_PRESETS[idx]
-        local sl = F.ShaderSliders
         if not p or p.reset then
             F.ResetShaders()
             State.shSat = 0; State.shContrast = 0; State.shBlur = 0
-            State.shClock = math.floor(Orig.ClockTime * 2 + 0.5) / 2
-            State.shBright = math.clamp(math.floor(Orig.Brightness * 10 + 0.5) / 10, 0.5, 5)
-            F.setState("shBloom", false); F.setState("shSunRays", false); F.setState("shDof", false)
-            if sl.sat then sl.sat.set(0) end
-            if sl.contrast then sl.contrast.set(0) end
-            if sl.clock then sl.clock.set(State.shClock) end
-            if sl.bright then sl.bright.set(State.shBright) end
-            if sl.blur then sl.blur.set(0) end
+            State.shClock = DEFAULT_STATE.shClock; State.shBright = DEFAULT_STATE.shBright
+            F.setState("shBloom", false, true); F.setState("shSunRays", false, true); F.setState("shDof", false, true)
+            for _, k in ipairs({ "shSat", "shContrast", "shClock", "shBright", "shBlur" }) do
+                if F.sliders[k] then F.sliders[k].set(State[k]) end
+            end
+            if State.autoSave then F.scheduleAutoSave() end
             return
         end
 
         pcall(function()
-            Lighting.Ambient = p.ambient
-            Lighting.OutdoorAmbient = p.outdoor
-            Lighting.ColorShift_Top = p.top
-            Lighting.ExposureCompensation = p.exposure or 0
+            Lighting.Ambient = p.ambient; Lighting.OutdoorAmbient = p.outdoor
+            Lighting.ColorShift_Top = p.top; Lighting.ExposureCompensation = p.exposure or 0
         end)
         State.shBloomInt = p.bloomInt; State.shSat = p.sat; State.shContrast = p.contrast
         State.shClock = p.clock; State.shBright = p.bright; State.shBlur = p.blur
-        F.setState("shBloom", p.bloom); F.setState("shSunRays", p.sun); F.setState("shDof", p.dof)
-        if sl.bloomInt then sl.bloomInt.set(p.bloomInt) end
-        if sl.sat then sl.sat.set(p.sat) end
-        if sl.contrast then sl.contrast.set(p.contrast) end
-        if sl.clock then sl.clock.set(p.clock) end
-        if sl.bright then sl.bright.set(p.bright) end
-        if sl.blur then sl.blur.set(p.blur) end
+        F.setState("shBloom", p.bloom, true); F.setState("shSunRays", p.sun, true); F.setState("shDof", p.dof, true)
+        for _, k in ipairs({ "shBloomInt", "shSat", "shContrast", "shClock", "shBright", "shBlur" }) do
+            if F.sliders[k] then F.sliders[k].set(State[k]) end
+        end
+        F.ApplyManualShaders(p.tint)
+        if State.autoSave then F.scheduleAutoSave() end
+    end
+
+    function F.ApplySavedShaders()
+        local idx = State.shaderPreset or 1
+        syncShaderSegs(idx)
+        local p = F.SHADER_PRESETS[idx]
+        if not p or p.reset then
+            F.ResetShaders()
+            if State.shBloom or State.shSunRays or State.shDof or State.shSat ~= 0 or State.shContrast ~= 0 or State.shBlur > 0 then
+                F.ApplyManualShaders()
+            end
+            return
+        end
+        pcall(function()
+            Lighting.Ambient = p.ambient; Lighting.OutdoorAmbient = p.outdoor
+            Lighting.ColorShift_Top = p.top; Lighting.ExposureCompensation = p.exposure or 0
+        end)
         F.ApplyManualShaders(p.tint)
     end
 
@@ -994,10 +1215,9 @@ function F.BuildBaconPreview(parent, x, y, w, h, isWinOpenFn)
         Active = true, ZIndex = 2,
     }, card)
 
-    -- декоративные 2D-элементы ТОЛЬКО на превью Бекона
     local espBox = F.Frame(vp, { AnchorPoint = V2(0.5, 0.5), Position = sc(0.5, 0.53), Size = off(122, 184), BackgroundTransparency = 1, ZIndex = 3 })
     F.Corner(espBox, 4)
-    local espBoxStroke = F.Stroke(espBox, State.prevColor, 0.1, 1.6)
+    local espBoxStroke = F.Stroke(espBox, F.getPrevColor(), 0.1, 1.6)
 
     local espNick = F.Label(vp, {
         AnchorPoint = V2(0.5, 1), Position = UDim2.new(0.5, 0, 0.53, -96),
@@ -1007,7 +1227,7 @@ function F.BuildBaconPreview(parent, x, y, w, h, isWinOpenFn)
     local espDist = F.Label(vp, {
         AnchorPoint = V2(0.5, 0), Position = UDim2.new(0.5, 0, 0.53, 96),
         Size = off(100, 14), Text = "16 м", TextSize = 10, Font = F.FONT_M,
-        TextColor3 = State.prevColor, TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 4,
+        TextColor3 = F.getPrevColor(), TextXAlignment = Enum.TextXAlignment.Center, ZIndex = 4,
     })
     local hpBg = F.Frame(vp, { AnchorPoint = V2(1, 0.5), Position = UDim2.new(0.5, -66, 0.53, 0), Size = off(4, 184), BackgroundColor3 = rgb(14, 14, 24), BackgroundTransparency = 0.2, ZIndex = 4 })
     F.Corner(hpBg, "full")
@@ -1023,9 +1243,8 @@ function F.BuildBaconPreview(parent, x, y, w, h, isWinOpenFn)
     local visuals = { model = nil, humanoid = nil, bodyColors = nil, headPart = nil, parts = {}, meshes = {}, decals = {}, clothes = {} }
     local camDist = 9.4
 
-    -- при Chams отключаем Humanoid и BodyColors в превью, чтобы светилось ВСЁ тело Бекона, а не только волосы
     local function RefreshPreview()
-        local col = State.prevColor
+        local col = F.getPrevColor()
         espBox.Visible = State.prevBox; espBoxStroke.Color = col
         espNick.Visible = State.prevNick
         espDist.Visible = State.prevDist; espDist.TextColor3 = col
@@ -1040,12 +1259,8 @@ function F.BuildBaconPreview(parent, x, y, w, h, isWinOpenFn)
 
         if visuals.humanoid then visuals.humanoid.Parent = chamsOn and nil or visuals.model end
         if visuals.bodyColors then visuals.bodyColors.Parent = chamsOn and nil or visuals.model end
-        for _, cl in ipairs(visuals.clothes) do
-            if cl.obj then cl.obj.Parent = chamsOn and nil or visuals.model end
-        end
-        for _, dc in ipairs(visuals.decals) do
-            if dc.decal then dc.decal.Transparency = chamsOn and 1 or dc.origTrans end
-        end
+        for _, cl in ipairs(visuals.clothes) do if cl.obj then cl.obj.Parent = chamsOn and nil or visuals.model end end
+        for _, dc in ipairs(visuals.decals) do if dc.decal then dc.decal.Transparency = chamsOn and 1 or dc.origTrans end end
         for _, ms in ipairs(visuals.meshes) do
             if ms.mesh then
                 pcall(function()
@@ -1064,6 +1279,7 @@ function F.BuildBaconPreview(parent, x, y, w, h, isWinOpenFn)
             end
         end
     end
+    F.refreshPrev = RefreshPreview
 
     local function MountModel(model)
         for _, ch in ipairs(world:GetChildren()) do
@@ -1076,8 +1292,7 @@ function F.BuildBaconPreview(parent, x, y, w, h, isWinOpenFn)
         visuals.bodyColors = model:FindFirstChildOfClass("BodyColors")
         if visuals.humanoid then
             visuals.humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
-            visuals.humanoid.PlatformStand = true
-            visuals.humanoid.AutoRotate = false
+            visuals.humanoid.PlatformStand = true; visuals.humanoid.AutoRotate = false
         end
 
         model.Parent = world
@@ -1086,7 +1301,6 @@ function F.BuildBaconPreview(parent, x, y, w, h, isWinOpenFn)
 
         RunService.Heartbeat:Wait()
 
-        -- фиксируем все части, чтобы отключение Humanoid при Chams не разваливало модель
         local bbCF, bbSize = model:GetBoundingBox()
         local shift = -bbCF.Position
         for _, obj in ipairs(model:GetDescendants()) do
@@ -1112,10 +1326,7 @@ function F.BuildBaconPreview(parent, x, y, w, h, isWinOpenFn)
         local skinGray = rgb(205, 206, 208)
         local okDesc, model = pcall(function()
             local desc = Instance.new("HumanoidDescription")
-            desc.HairAccessory = "63690008"
-            desc.Shirt = 144076358
-            desc.Pants = 144076760
-            desc.Face  = 144080495
+            desc.HairAccessory = "63690008"; desc.Shirt = 144076358; desc.Pants = 144076760; desc.Face = 144080495
             desc.HeadColor = skinGray; desc.TorsoColor = skinGray
             desc.LeftArmColor = skinGray; desc.RightArmColor = skinGray
             desc.LeftLegColor = skinGray; desc.RightLegColor = skinGray
@@ -1185,7 +1396,7 @@ function F.BuildBaconPreview(parent, x, y, w, h, isWinOpenFn)
     local spinHat = 0
     F.bind(RunService.RenderStepped, function(dt)
         spinHat = (spinHat + dt * 0.9) % (math.pi * 2)
-        local hatCol = State.hatRgb and Color3.fromHSV((os.clock() * 0.25) % 1, 0.85, 1) or State.hatColor
+        local hatCol = State.hatRgb and Color3.fromHSV((os.clock() * 0.25) % 1, 0.85, 1) or F.getHatColor()
 
         local char = LocalPlayer.Character
         local head = char and char:FindFirstChild("Head")
@@ -1205,10 +1416,9 @@ function F.BuildBaconPreview(parent, x, y, w, h, isWinOpenFn)
 end
 
 ----------------------------------------------------------------------
--- ЕДИНСТВЕННАЯ ВКЛАДКА: ВИЗУАЛ
+-- ВКЛАДКА 1: ВИЗУАЛ (3D-БЕКОН + ШЛЯПА КАСА + ШЕЙДЕРЫ)
 ----------------------------------------------------------------------
 function F.BuildVisualPage(page, isWinOpenFn)
-    table.clear(F.searchItems)
     local s = page.scroller
     F.Label(s, { Position = off(26, 12), Size = off(420, 38), Text = "Визуал", TextSize = 28, Font = F.FONT_B, TextColor3 = rgb(236, 230, 255) })
     F.Label(s, { Position = off(26, 50), Size = off(520, 22), Text = "3D-превью Бекона, самурайская шляпа (Каса) и шейдеры", TextSize = 13.5, TextColor3 = C.txt2 })
@@ -1222,7 +1432,7 @@ function F.BuildVisualPage(page, isWinOpenFn)
     local preview = F.BuildBaconPreview(L.holder, 0, L.y, COLW, 306, isWinOpenFn)
     L.y = L.y + 314
 
-    L:segment("Стиль чамсов (на всё тело)", { "Обычный", "Glow", "Flat", "Glass" }, State.chamsMode, function(idx, name)
+    L:segment("chamsMode", "Стиль чамсов (на всё тело)", { "Обычный", "Glow", "Flat", "Glass" }, State.chamsMode, function(idx, name)
         State.chamsMode = idx
         preview.refresh()
         F.toast("Чамсы: " .. name, "sparkle")
@@ -1230,39 +1440,31 @@ function F.BuildVisualPage(page, isWinOpenFn)
 
     L:header("Шейдеры (Освещение)", "sun", "8 пресетов", 14)
     do
-        local seg1, seg2
         local r1 = L:row(46, { sep = false })
-        seg1 = F.Segmented(r1, 0, 4, COLW, { "Оригинал", "RTX", "Кибер", "Закат" }, 1, function(i)
-            seg2.set(nil, true)
+        local pIdx = State.shaderPreset
+        local seg1 = F.Segmented(r1, 0, 4, COLW, { "Оригинал", "RTX", "Кибер", "Закат" }, (pIdx <= 4) and pIdx or nil, function(i)
             F.ApplyShaderPreset(i)
             F.toast("Шейдер: " .. F.SHADER_PRESETS[i].name, "sun")
         end)
         local r2 = L:row(50)
-        seg2 = F.Segmented(r2, 0, 4, COLW, { "Аниме", "Нуар", "Зима", "Vapor" }, nil, function(i)
-            seg1.set(nil, true)
+        local seg2 = F.Segmented(r2, 0, 4, COLW, { "Аниме", "Нуар", "Зима", "Vapor" }, (pIdx > 4) and (pIdx - 4) or nil, function(i)
             F.ApplyShaderPreset(i + 4)
             F.toast("Шейдер: " .. F.SHADER_PRESETS[i + 4].name, "sun")
         end)
+        F.shaderSeg1, F.shaderSeg2 = seg1, seg2
         table.insert(F.searchItems, { row = r1, text = "шейдеры оригинал rtx киберпанк закат" })
         table.insert(F.searchItems, { row = r2, text = "шейдеры аниме нуар зима vaporwave" })
     end
 
-    local sl = F.ShaderSliders
     L:toggle("shBloom", "Свечение (Bloom)", "Мягкое сияние ярких объектов", function() F.ApplyManualShaders() end)
-    local _, sBloom = L:slider("shBloomInt", "Сила свечения", nil, { min = 0, max = 3, step = 0.05, fmt = function(v) return string.format("%.2f", v) end, onChange = function() F.ApplyManualShaders() end })
-    sl.bloomInt = sBloom
+    L:slider("shBloomInt", "Сила свечения", nil, { min = 0, max = 3, step = 0.05, fmt = function(v) return string.format("%.2f", v) end, onChange = function() F.ApplyManualShaders() end })
     L:toggle("shSunRays", "Лучи солнца (SunRays)", "Объёмные солнечные лучи", function() F.ApplyManualShaders() end)
     L:toggle("shDof", "Глубина резкости (DOF)", "Мягкое размытие дальнего фона", function() F.ApplyManualShaders() end)
-    local _, sSat = L:slider("shSat", "Насыщенность", nil, { min = -1, max = 1, step = 0.05, fmt = function(v) return string.format("%+.2f", v) end, onChange = function() F.ApplyManualShaders() end })
-    sl.sat = sSat
-    local _, sCon = L:slider("shContrast", "Контраст", nil, { min = -0.5, max = 0.8, step = 0.05, fmt = function(v) return string.format("%+.2f", v) end, onChange = function() F.ApplyManualShaders() end })
-    sl.contrast = sCon
-    local _, sClk = L:slider("shClock", "Время суток", nil, { min = 0, max = 24, step = 0.5, fmt = function(v) return string.format("%.1f ч", v) end, onChange = function() F.ApplyManualShaders() end })
-    sl.clock = sClk
-    local _, sBrt = L:slider("shBright", "Яркость мира", nil, { min = 0.5, max = 5, step = 0.1, fmt = function(v) return string.format("%.1f", v) end, onChange = function() F.ApplyManualShaders() end })
-    sl.bright = sBrt
-    local _, sBlr = L:slider("shBlur", "Размытие экрана", nil, { min = 0, max = 24, step = 1, fmt = function(v) return string.format("%d px", v) end, onChange = function() F.ApplyManualShaders() end })
-    sl.blur = sBlr
+    L:slider("shSat", "Насыщенность", nil, { min = -1, max = 1, step = 0.05, fmt = function(v) return string.format("%+.2f", v) end, onChange = function() F.ApplyManualShaders() end })
+    L:slider("shContrast", "Контраст", nil, { min = -0.5, max = 0.8, step = 0.05, fmt = function(v) return string.format("%+.2f", v) end, onChange = function() F.ApplyManualShaders() end })
+    L:slider("shClock", "Время суток", nil, { min = 0, max = 24, step = 0.5, fmt = function(v) return string.format("%.1f ч", v) end, onChange = function() F.ApplyManualShaders() end })
+    L:slider("shBright", "Яркость мира", nil, { min = 0.5, max = 5, step = 0.1, fmt = function(v) return string.format("%.1f", v) end, onChange = function() F.ApplyManualShaders() end })
+    L:slider("shBlur", "Размытие экрана", nil, { min = 0, max = 24, step = 1, fmt = function(v) return string.format("%d px", v) end, onChange = function() F.ApplyManualShaders() end })
     L:button("Сбросить шейдеры", "undo", "ghost", function()
         F.ApplyShaderPreset(1)
         F.toast("Шейдеры сброшены к оригиналу", "undo")
@@ -1270,7 +1472,7 @@ function F.BuildVisualPage(page, isWinOpenFn)
 
     -- ПРАВАЯ КОЛОНКА: Самурайская шляпа (Каса) + Визуал превью Бекона
     R:header("Самурайская шляпа (Каса)", "hat", "На голове + 3D")
-    R:toggle("hatEnabled", "Включить шляпу", "Коническая самурайская шляпа над головой")
+    R:toggle("hatEnabled", "Включить шляпу", "Коническая самурайская шляпа (выкл. по умолчанию)")
     R:toggle("hatRgb", "Радуга (RGB)", "Плавный перелив всех цветов")
     R:slider("hatSize", "Размер шляпы", "Ширина полей и высота конуса", {
         min = 0.5, max = 3.0, step = 0.05, fmt = function(v) return string.format("%.2fx", v) end,
@@ -1281,8 +1483,8 @@ function F.BuildVisualPage(page, isWinOpenFn)
     R:slider("hatTrans", "Прозрачность шляпы", nil, {
         min = 0, max = 95, step = 5, fmt = function(v) return string.format("%d%%", v) end,
     })
-    R:segment("Материал шляпы", { "Neon", "Glass", "Flat", "Field" }, State.hatMat, function(i) State.hatMat = i end)
-    R:palette("Цвет шляпы", State.hatColorIdx, function(i, col) State.hatColorIdx = i; State.hatColor = col end)
+    R:segment("hatMat", "Материал шляпы", { "Neon", "Glass", "Flat", "Field" }, State.hatMat, function(i) State.hatMat = i end)
+    R:palette("hatColorIdx", "Цвет шляпы", State.hatColorIdx, function(i) State.hatColorIdx = i end)
 
     R:header("Оформление 3D-превью", "target", "Только превью", 14)
     R:toggle("prevBox", "Рамка на превью", "2D рамка вокруг 3D-Бекона", function() preview.refresh() end)
@@ -1293,12 +1495,126 @@ function F.BuildVisualPage(page, isWinOpenFn)
         min = 5, max = 95, step = 5, fmt = function(v) return string.format("%d%%", v) end,
         onChange = function() preview.refresh() end,
     })
-    R:palette("Цвет рамки и чамсов", State.prevColorIdx, function(i, col)
-        State.prevColorIdx = i; State.prevColor = col
-        preview.refresh()
+    R:palette("prevColorIdx", "Цвет рамки и чамсов", State.prevColorIdx, function(i)
+        State.prevColorIdx = i; preview.refresh()
     end, { sep = false })
 
     page.setHeight(math.max(L.y, R.y) + 32)
+end
+
+----------------------------------------------------------------------
+-- ВКЛАДКА 2: МЕНЮ И КОНФИГИ (РАЗМЕР МЕНЮ + СОХРАНЕНИЕ)
+----------------------------------------------------------------------
+function F.BuildConfigPage(page)
+    local s = page.scroller
+    F.Label(s, { Position = off(26, 12), Size = off(460, 38), Text = "Меню и Конфиги", TextSize = 28, Font = F.FONT_B, TextColor3 = rgb(236, 230, 255) })
+    F.Label(s, { Position = off(26, 50), Size = off(560, 22), Text = "Размер интерфейса, автосохранение при выходе и профили настроек", TextSize = 13.5, TextColor3 = C.txt2 })
+
+    local LX, RX, COLW = 26, 422, 372
+    local L = F.newColumn(s, LX, 90, COLW)
+    local R = F.newColumn(s, RX, 90, COLW)
+
+    -- ЛЕВАЯ КОЛОНКА: Размер меню и автосохранение
+    L:header("Размер и вид меню", "sliders", "Под любой экран")
+
+    local sizeVals = { 0.75, 1.0, 1.25 }
+    local initPreset = (State.menuScale <= 0.85 and 1) or (State.menuScale >= 1.15 and 3) or 2
+    L:segment(nil, "Быстрый размер", { "Маленькое", "Среднее", "Большое" }, initPreset, function(i)
+        local v = sizeVals[i]
+        State.menuScale = v
+        if F.sliders.menuScale then F.sliders.menuScale.set(v) end
+        F.applyScale(v)
+        F.toast("Размер меню: " .. string.format("%.2fx", v), "sliders")
+    end)
+
+    L:slider("menuScale", "Масштаб меню (точнее)", "Уменьшай или увеличивай окно как удобно", {
+        min = 0.55, max = 1.45, step = 0.05,
+        fmt = function(v) return string.format("%.2fx", v) end,
+        onChange = function(v) F.applyScale(v) end,
+    })
+
+    L:slider("panelOpacity", "Непрозрачность панели", "Чем меньше, тем лучше видно игру за меню", {
+        min = 40, max = 100, step = 2,
+        fmt = function(v) return string.format("%d%%", v) end,
+        onChange = function(v) F.applyOpac(v) end,
+    })
+
+    L:header("Сохранение", "save", "Авто + сброс", 12)
+    L:toggle("autoSave", "Автосохранение", "Сохраняет все настройки автоматически и при выходе", function(v)
+        if v then F.saveAuto(); F.toast("Автосохранение включено", "save") end
+    end)
+
+    L:button("Сохранить сейчас", "save", "primary", function()
+        F.saveAuto()
+        F.toast("Текущие настройки сохранены", "save")
+    end)
+
+    L:button("Сбросить все настройки", "undo", "ghost", function()
+        F.resetAllToDefaults()
+        F.toast("Все настройки сброшены", "undo")
+    end, { sep = false })
+
+    -- ПРАВАЯ КОЛОНКА: Менеджер конфигов
+    R:header("Создать конфиг", "folder", "JSON профили")
+    local nameRow = R:row(58, { sep = false })
+    local _, cfgNameBox = F.Input(nameRow, 0, 4, COLW, 46, "pencil", "Название конфига (например: my_cfg)", 14)
+
+    local listContainer = F.Frame(R.holder, { Name = "CfgList", BackgroundTransparency = 1, Position = off(0, 0), Size = off(COLW, 10) })
+    local rebuildList
+
+    R:button("Сохранить как новый конфиг", "save", "primary", function()
+        local ok, res = F.saveConfig(cfgNameBox.Text)
+        if ok then
+            cfgNameBox.Text = ""
+            rebuildList()
+            F.toast('Конфиг "' .. res .. '" сохранён', "save")
+        else
+            F.toast(res, "x")
+        end
+    end)
+
+    R:header("Сохранённые конфиги", "folder", "Загрузка в 1 клик", 12)
+    local listStartY = R.y
+    listContainer.Position = off(0, listStartY)
+
+    rebuildList = function()
+        for _, ch in ipairs(listContainer:GetChildren()) do ch:Destroy() end
+        local names = F.listConfigs()
+        local y = 0
+        if #names == 0 then
+            F.Label(listContainer, { Position = off(0, 4), Size = off(COLW, 24), Text = "Пока нет сохранённых конфигов", TextSize = 13, TextColor3 = C.txt3, Font = F.FONT_R })
+            y = 34
+        else
+            for _, cname in ipairs(names) do
+                local item = F.Frame(listContainer, { Position = off(0, y), Size = off(COLW, 54), BackgroundColor3 = C.panel, BackgroundTransparency = 0.45 })
+                F.Corner(item, 14); F.Stroke(item, C.white, 0.88, 1)
+
+                F.Label(item, { Position = off(14, 0), Size = off(COLW - 188, 54), Text = cname, TextSize = 14.5, Font = F.FONT_B, ClipsDescendants = true })
+
+                F.MakeButton(item, COLW - 168, 9, 78, 36, "Загр.", nil, "primary", function()
+                    if F.loadConfig(cname) then
+                        F.toast('Загружен "' .. cname .. '"', "check")
+                    else
+                        F.toast("Ошибка чтения конфига", "x")
+                    end
+                end)
+                F.MakeButton(item, COLW - 84, 9, 36, 36, "", "save", "ghost", function()
+                    F.saveConfig(cname)
+                    F.toast('Обновлён "' .. cname .. '"', "save")
+                end)
+                F.MakeButton(item, COLW - 42, 9, 36, 36, "", "trash", "danger", function()
+                    F.deleteConfig(cname)
+                    rebuildList()
+                    F.toast('Удалён "' .. cname .. '"', "trash")
+                end)
+                y = y + 62
+            end
+        end
+        listContainer.Size = off(COLW, y)
+        page.setHeight(math.max(L.y, listStartY + y) + 32)
+    end
+
+    rebuildList()
 end
 
 ----------------------------------------------------------------------
@@ -1314,7 +1630,6 @@ function F.RunIntro3DF(orb, orbScale, getOrbTargetPos)
         end
     end
 
-    -- страховка: даже если рендер прервётся, шар всё равно появится
     task.delay(3.4, ensureOrbVisible)
 
     task.spawn(function()
@@ -1431,7 +1746,7 @@ function F.RunIntro3DF(orb, orbScale, getOrbTargetPos)
 end
 
 ----------------------------------------------------------------------
--- ОБОЛОЧКА МЕНЮ (МИНИМУМ UPVALUES — ГАРАНТИРОВАННЫЙ ЗАПУСК!)
+-- ОБОЛОЧКА МЕНЮ (2 ВКЛАДКИ: ВИЗУАЛ + КОНФИГИ)
 ----------------------------------------------------------------------
 local function BuildShell()
     local Quint, Quad, Back = Enum.EasingStyle.Quint, Enum.EasingStyle.Quad, Enum.EasingStyle.Back
@@ -1466,8 +1781,7 @@ local function BuildShell()
         end)
     end
 
-    local userScale = 1
-    local function curScale() return F.baseScale() * userScale end
+    local function curScale() return F.baseScale() * State.menuScale end
     local winOpen, cardOpen, authed = false, false, false
 
     local topbarWas
@@ -1538,7 +1852,7 @@ local function BuildShell()
     end)
 
     -- Главное окно
-    local winBaseT = 0.13
+    local winBaseT = (1 - State.panelOpacity / 100) * 0.9 + 0.025
     local win = F.Frame(gui, {
         Name = "Window", AnchorPoint = V2(0.5, 0.5), Position = F.homeCenter(), Size = off(WIN_W, WIN_H),
         BackgroundColor3 = C.white, BackgroundTransparency = winBaseT, Visible = false,
@@ -1595,35 +1909,67 @@ local function BuildShell()
     end
     F.Frame(body, { Position = off(0, HEAD_H - 1), Size = off(WIN_W, 1), BackgroundTransparency = 0.92 })
 
-    -- Боковая панель (только 1 вкладка: Визуал)
+    -- Боковая панель (2 вкладки: Визуал и Конфиги)
     local side = F.Frame(body, { Name = "Sidebar", BackgroundTransparency = 1, Position = off(0, HEAD_H), Size = off(SIDE_W, PAGE_H) })
     F.Frame(body, { Position = off(SIDE_W - 1, HEAD_H), Size = off(1, PAGE_H), BackgroundTransparency = 0.93 })
-    F.Label(side, { Position = off(20, PAGE_H - 36), Size = off(150, 14), Text = "FINIS VISUAL  ·  v2.1", TextSize = 9.5, TextColor3 = C.txt4 })
+    F.Label(side, { Position = off(20, PAGE_H - 36), Size = off(150, 14), Text = "FINIS VISUAL  ·  v2.2", TextSize = 9.5, TextColor3 = C.txt4 })
 
+    local NAV = {
+        { id = "visual",  title = "Визуал",  icon = "eye" },
+        { id = "configs", title = "Конфиги", icon = "folder" },
+    }
     local selPill = F.Frame(side, { Position = off(8, 13), Size = off(155, 50), BackgroundTransparency = 0.9 })
     F.Corner(selPill, 16); F.Stroke(selPill, C.white, 0.82, 1)
     F.Corner(F.Frame(selPill, { Position = off(3, 16), Size = off(3, 18), BackgroundColor3 = C.b }), "full")
-    F.Icon(side, "eye", 18, rgb(206, 196, 255), { Position = off(30, 29) })
-    F.Label(side, { Position = off(63, 13), Size = off(100, 50), Text = "Визуал", TextSize = 16, TextColor3 = C.white })
 
-    -- Страница «Визуал» + инерционный скролл
     local pageHost = F.Frame(body, { Name = "Pages", BackgroundTransparency = 1, Position = off(SIDE_W, HEAD_H), Size = off(PAGE_W, PAGE_H), ClipsDescendants = true })
-    local scroller = F.New("ScrollingFrame", {
-        Name = "VisualScroll", BackgroundTransparency = 1, BorderSizePixel = 0, Size = off(PAGE_W, PAGE_H),
-        CanvasSize = off(0, PAGE_H), ScrollBarThickness = 3, ScrollBarImageColor3 = rgb(206, 196, 255),
-        ScrollBarImageTransparency = 0.45, ScrollingDirection = Enum.ScrollingDirection.Y, ScrollingEnabled = false,
-    }, pageHost)
-    local visualPage = { scroller = scroller, setHeight = function(h) scroller.CanvasSize = off(0, math.max(h, PAGE_H)) end }
+    local Pages, navBtns, currentTab = {}, {}, "visual"
+
+    local function createPage(id)
+        local holder = F.Frame(pageHost, { Name = "Page_" .. id, BackgroundTransparency = 1, Size = off(PAGE_W, PAGE_H), Visible = (id == "visual") })
+        local scroller = F.New("ScrollingFrame", {
+            Name = "Scroll", BackgroundTransparency = 1, BorderSizePixel = 0, Size = off(PAGE_W, PAGE_H),
+            CanvasSize = off(0, PAGE_H), ScrollBarThickness = 3, ScrollBarImageColor3 = rgb(206, 196, 255),
+            ScrollBarImageTransparency = 0.45, ScrollingDirection = Enum.ScrollingDirection.Y, ScrollingEnabled = false,
+        }, holder)
+        Pages[id] = { holder = holder, scroller = scroller, setHeight = function(h) scroller.CanvasSize = off(0, math.max(h, PAGE_H)) end }
+        return Pages[id]
+    end
 
     local Scroll = { blocked = false, active = false, moved = false, startY = 0, baseY = 0, lastY = 0, lastT = 0, vel = 0, coast = 0 }
+    local function curScroller() return Pages[currentTab] and Pages[currentTab].scroller end
     local function setScrollY(y)
-        local maxY = math.max(0, scroller.CanvasSize.Y.Offset - PAGE_H)
-        y = math.clamp(y, 0, maxY)
-        scroller.CanvasPosition = V2(0, y)
+        local sc_ = curScroller()
+        if not sc_ then return 0 end
+        y = math.clamp(y, 0, math.max(0, sc_.CanvasSize.Y.Offset - PAGE_H))
+        sc_.CanvasPosition = V2(0, y)
         return y
     end
     function F.scrollLock(locked) Scroll.blocked = locked end
 
+    local function switchTab(id)
+        if currentTab == id then return end
+        currentTab = id; Scroll.coast = 0
+        for tabId, pg in pairs(Pages) do pg.holder.Visible = (tabId == id) end
+        for tabId, it in pairs(navBtns) do
+            local on = (tabId == id)
+            F.setIconColor(it.icon, on and rgb(206, 196, 255) or rgb(160, 162, 196), false)
+            F.tw(it.label, 0.2, { TextColor3 = on and C.white or rgb(182, 183, 211) })
+            if on then F.tw(selPill, 0.3, { Position = off(8, it.y) }, Quint, Out) end
+        end
+    end
+
+    for i, item in ipairs(NAV) do
+        local y = 13 + (i - 1) * 56
+        local on = (item.id == "visual")
+        local ic = F.Icon(side, item.icon, 18, on and rgb(206, 196, 255) or rgb(160, 162, 196), { Position = off(30, y + 16) })
+        local lb = F.Label(side, { Position = off(63, y), Size = off(100, 50), Text = item.title, TextSize = 16, TextColor3 = on and C.white or rgb(182, 183, 211) })
+        local b = F.Button(side, { Position = off(8, y), Size = off(155, 50), ZIndex = 3 })
+        navBtns[item.id] = { icon = ic, label = lb, y = y }
+        b.Activated:Connect(function() if not F.scrolled then switchTab(item.id) end end)
+    end
+
+    -- Инерционный скролл
     local function insidePage(pos)
         local a, s_ = pageHost.AbsolutePosition, pageHost.AbsoluteSize
         local inset = GuiService:GetGuiInset()
@@ -1635,15 +1981,17 @@ local function BuildShell()
         local t = input.UserInputType
         if t ~= Enum.UserInputType.Touch and t ~= Enum.UserInputType.MouseButton1 then return end
         if not winOpen or Scroll.blocked or not insidePage(input.Position) then return end
+        local sc_ = curScroller(); if not sc_ then return end
         Scroll.active, Scroll.moved = true, false
         Scroll.startY, Scroll.lastY, Scroll.lastT = input.Position.Y, input.Position.Y, os.clock()
-        Scroll.vel, Scroll.coast, Scroll.baseY = 0, 0, scroller.CanvasPosition.Y
+        Scroll.vel, Scroll.coast, Scroll.baseY = 0, 0, sc_.CanvasPosition.Y
     end)
 
     F.bind(UserInputService.InputChanged, function(input)
         local t = input.UserInputType
         if t == Enum.UserInputType.MouseWheel then
-            if winOpen and not Scroll.blocked then Scroll.coast = 0; setScrollY(scroller.CanvasPosition.Y - input.Position.Z * 80) end
+            local sc_ = curScroller()
+            if winOpen and sc_ and not Scroll.blocked then Scroll.coast = 0; setScrollY(sc_.CanvasPosition.Y - input.Position.Z * 80) end
             return
         end
         if not Scroll.active or (t ~= Enum.UserInputType.Touch and t ~= Enum.UserInputType.MouseMovement) then return end
@@ -1652,7 +2000,8 @@ local function BuildShell()
         if not Scroll.moved then
             if math.abs(input.Position.Y - Scroll.startY) < 10 * k then return end
             Scroll.moved = true; F.scrolled = true
-            Scroll.startY, Scroll.baseY, Scroll.lastY, Scroll.lastT = input.Position.Y, scroller.CanvasPosition.Y, input.Position.Y, os.clock()
+            local sc_ = curScroller()
+            Scroll.startY, Scroll.baseY, Scroll.lastY, Scroll.lastT = input.Position.Y, sc_ and sc_.CanvasPosition.Y or 0, input.Position.Y, os.clock()
             return
         end
         local now = os.clock()
@@ -1672,9 +2021,14 @@ local function BuildShell()
         else F.scrolled = false end
     end)
 
-    F.BuildVisualPage(visualPage, function() return winOpen end)
+    -- Собираем обе вкладки
+    table.clear(F.searchItems)
+    F.BuildVisualPage(createPage("visual"), function() return winOpen end)
+    F.BuildConfigPage(createPage("configs"))
+    -- применяем сохранённые шейдеры после автозагрузки
+    F.ApplySavedShaders()
 
-    -- уголок масштаба + частицы
+    -- Уголок масштаба + частицы
     local grip = F.Button(body, { Position = off(WIN_W - 34, WIN_H - 34), Size = off(30, 30), ZIndex = 5 })
     for r = 0, 2 do for c = 0, 2 - r do F.Corner(F.Frame(grip, { Position = off(20 - c*6, 20 - r*6), Size = off(2.5, 2.5), BackgroundTransparency = 0.55 }), "full") end end
 
@@ -1709,6 +2063,15 @@ local function BuildShell()
         if cardFrame and cardOpen then cardFrame.UIScale.Scale = curScale() end
         if orb.Visible then orbScale.Scale = F.baseScale() end
     end
+    function F.applyScale(v)
+        State.menuScale = math.clamp(v, 0.55, 1.45)
+        applyScales()
+    end
+    function F.applyOpac(v)
+        State.panelOpacity = math.clamp(v, 40, 100)
+        winBaseT = (1 - State.panelOpacity / 100) * 0.9 + 0.025
+        F.tw(win, 0.2, { BackgroundTransparency = winBaseT })
+    end
 
     local function makeDraggable(target, handle, hooks)
         handle.InputBegan:Connect(function(input)
@@ -1738,13 +2101,17 @@ local function BuildShell()
 
     grip.InputBegan:Connect(function(input)
         if not F.isPress(input) then return end
-        local startPos, startScale = input.Position, userScale
+        local startPos, startScale = input.Position, State.menuScale
         F.scrollLock(true)
         F.beginDrag(function(i)
             local d = ((i.Position.X - startPos.X) + (i.Position.Y - startPos.Y)) / 2
-            userScale = math.floor(math.clamp(startScale + d / (WIN_W * curScale()), 0.6, 1.5) * 20 + 0.5) / 20
-            applyScales()
-        end, function() F.scrollLock(false) end)
+            local v = math.floor(math.clamp(startScale + d / (WIN_W * curScale()), 0.55, 1.45) * 20 + 0.5) / 20
+            F.applyScale(v)
+            if F.sliders.menuScale then F.sliders.menuScale.set(v) end
+        end, function()
+            F.scrollLock(false)
+            if State.autoSave then F.scheduleAutoSave() end
+        end)
     end)
 
     local function openWindow()
@@ -1789,7 +2156,7 @@ local function BuildShell()
         keyBox.TextTransparency = 1 - a; keyBox.PlaceholderText = (a > 0.6) and "Ваш ключ" or ""
         F.setIconAlpha(inIcon, a)
     end
-    F.Label(cardBody, { Position = off(0, 396), Size = off(CARD_W, 16), Text = "FINIS VISUAL  ·  v2.1", TextSize = 9.5, TextColor3 = C.txt4, TextXAlignment = Enum.TextXAlignment.Center })
+    F.Label(cardBody, { Position = off(0, 396), Size = off(CARD_W, 16), Text = "FINIS VISUAL  ·  v2.2", TextSize = 9.5, TextColor3 = C.txt4, TextXAlignment = Enum.TextXAlignment.Center })
 
     local pasteWrap = F.Group(cardBody, { Position = off(35, 306), Size = off(141, 52) })
     F.MakeButton(pasteWrap, 0, 0, 141, 52, "Вставить", "clipboard", "ghost", function()
@@ -1926,10 +2293,13 @@ local function BuildShell()
             end
         end
         if Scroll.coast ~= 0 then
-            local y = scroller.CanvasPosition.Y + Scroll.coast * dt
-            if setScrollY(y) ~= y then Scroll.coast = 0 end
-            Scroll.coast = Scroll.coast * math.max(0, 1 - 5 * dt)
-            if math.abs(Scroll.coast) < 12 then Scroll.coast = 0 end
+            local sc_ = curScroller()
+            if sc_ then
+                local y = sc_.CanvasPosition.Y + Scroll.coast * dt
+                if setScrollY(y) ~= y then Scroll.coast = 0 end
+                Scroll.coast = Scroll.coast * math.max(0, 1 - 5 * dt)
+                if math.abs(Scroll.coast) < 12 then Scroll.coast = 0 end
+            else Scroll.coast = 0 end
         end
         if Scroll.blocked and not F.Drag.finish then Scroll.blocked = false end
     end)
