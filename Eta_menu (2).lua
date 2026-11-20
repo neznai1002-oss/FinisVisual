@@ -1,7 +1,5 @@
 --[[
-    Finis Visual v2.4 — 3D-интро "F" + 3D-Бекон + Самурайская шляпа + Шейдеры
-    + Визуалы игрока (Chams / Trail / FOV) + Движение (Fly, Noclip, Spin, Fling, Speed, Jump, InfJump)
-    + Островок статуса + Защита от флинга (Anti-Fling / Anti-Void) + Конфиги
+    Finis Visual v2.4 — Полный скрипт (100%, одним блоком)
     Ключ для входа: @FinisOkek (регистр не важен)
 ]]
 
@@ -57,7 +55,7 @@ function F.onCleanup(fn)
 end
 
 ----------------------------------------------------------------------
--- ScreenGui (CoreGui приоритетно для стабильного 3D ViewportFrame)
+-- ScreenGui
 ----------------------------------------------------------------------
 local gui = Instance.new("ScreenGui")
 gui.Name = "FinisVisualMenu"
@@ -125,19 +123,18 @@ local C = {
 F.C = C
 
 local PALETTE = {
-    rgb(160, 172, 250), -- жемчуг
-    rgb(255, 92, 128),  -- розовый
-    rgb(72, 198, 255),  -- голубой
-    rgb(96, 232, 152),  -- мятный
-    rgb(255, 210, 96),  -- золотой
-    rgb(255, 134, 68),  -- оранжевый
-    rgb(196, 116, 255), -- неон-фиолет
-    rgb(245, 248, 255), -- белый
+    rgb(160, 172, 250),
+    rgb(255, 92, 128),
+    rgb(72, 198, 255),
+    rgb(96, 232, 152),
+    rgb(255, 210, 96),
+    rgb(255, 134, 68),
+    rgb(196, 116, 255),
+    rgb(245, 248, 255),
 }
 F.PALETTE = PALETTE
 
 local DEFAULT_STATE = {
-    -- оформление 3D-превью Бекона
     prevBox      = true,
     prevNick     = true,
     prevDist     = true,
@@ -146,7 +143,6 @@ local DEFAULT_STATE = {
     chamsTrans   = 25,
     prevColorIdx = 2,
 
-    -- дополнительные визуалы в мире
     espPlayers   = false,
     espColorIdx  = 2,
     trailEnabled = false,
@@ -155,7 +151,6 @@ local DEFAULT_STATE = {
     fovEnabled   = false,
     fovValue     = 90,
 
-    -- косметическая самурайская шляпа
     hatEnabled   = false,
     hatRgb       = false,
     hatSize      = 1.25,
@@ -164,7 +159,6 @@ local DEFAULT_STATE = {
     hatMat       = 1,
     hatColorIdx  = 1,
 
-    -- шейдеры (Lighting)
     shaderPreset = 1,
     shBloom      = false,
     shBloomInt   = 0.8,
@@ -176,7 +170,6 @@ local DEFAULT_STATE = {
     shBright     = 2.0,
     shBlur       = 0,
 
-    -- движение и физика
     flyEnabled   = false,
     flySpeed     = 65,
     noclip       = false,
@@ -190,11 +183,9 @@ local DEFAULT_STATE = {
     flingEnabled = false,
     flingPower   = 15000,
 
-    -- защита от флинга
     antiFling    = true,
     antiVoid     = true,
 
-    -- настройки меню, островок и автосохранение
     menuScale    = 1.0,
     panelOpacity = 88,
     island       = true,
@@ -1017,7 +1008,6 @@ do
     local origWalkSpeed = 16
     local origJumpPower = 50
     local origJumpHeight = 7.2
-    local origUseJumpPower = true
 
     local function restoreOtherCollisions()
         for part, origCanCollide in pairs(touchedParts) do
@@ -1081,29 +1071,14 @@ do
         end
     end
 
-    F.bindState("antiFling", function(v)
-        if not v then restoreOtherCollisions() end
-    end)
-    F.bindState("noclip", function(v)
-        if not v then restoreNoclip() end
-    end)
-    F.bindState("flyEnabled", function(v)
-        if not v then cleanupFly() end
-    end)
-    F.bindState("spinEnabled", function(v)
-        if not v then cleanupSpin() end
-    end)
-    F.bindState("flingEnabled", function(v)
-        if not v then cleanupFling() end
-    end)
-    F.bindState("speedEnabled", function(v)
-        if not v then restoreSpeedJump() end
-    end)
-    F.bindState("jumpEnabled", function(v)
-        if not v then restoreSpeedJump() end
-    end)
+    F.bindState("antiFling", function(v) if not v then restoreOtherCollisions() end end)
+    F.bindState("noclip", function(v) if not v then restoreNoclip() end end)
+    F.bindState("flyEnabled", function(v) if not v then cleanupFly() end end)
+    F.bindState("spinEnabled", function(v) if not v then cleanupSpin() end end)
+    F.bindState("flingEnabled", function(v) if not v then cleanupFling() end end)
+    F.bindState("speedEnabled", function(v) if not v then restoreSpeedJump() end end)
+    F.bindState("jumpEnabled", function(v) if not v then restoreSpeedJump() end end)
 
-    -- Infinite Jump (работает на земле, в воздухе и в полёте)
     F.bind(UserInputService.JumpRequest, function()
         if not State.infJump then return end
         local char = LocalPlayer.Character
@@ -1113,7 +1088,6 @@ do
 
         local jp = State.jumpEnabled and State.jumpPower or (hum.UseJumpPower and hum.JumpPower or 50)
         if State.flyEnabled then
-            -- рывок вверх прямо во время полёта
             root.AssemblyLinearVelocity = Vector3.new(root.AssemblyLinearVelocity.X, math.max(jp, 55), root.AssemblyLinearVelocity.Z)
         else
             hum:ChangeState(Enum.HumanoidStateType.Jumping)
@@ -1129,7 +1103,6 @@ do
             origWalkSpeed = hum.WalkSpeed
             origJumpPower = hum.JumpPower
             origJumpHeight = hum.JumpHeight
-            origUseJumpPower = hum.UseJumpPower
         end
     end)
 
@@ -1138,16 +1111,13 @@ do
         local myRoot = myChar and (myChar:FindFirstChild("HumanoidRootPart") or myChar:FindFirstChild("Torso"))
         local myHum  = myChar and myChar:FindFirstChildOfClass("Humanoid")
 
-        -- 1. Anti-Fling (не срабатывает если включён наш собственный Fling)
         if State.antiFling and not State.flingEnabled then
             for _, plr in ipairs(Players:GetPlayers()) do
                 if plr ~= LocalPlayer and plr.Character then
                     for _, part in ipairs(plr.Character:GetDescendants()) do
                         if part:IsA("BasePart") then
                             if part.CanCollide then
-                                if touchedParts[part] == nil then
-                                    touchedParts[part] = true
-                                end
+                                if touchedParts[part] == nil then touchedParts[part] = true end
                                 part.CanCollide = false
                             end
                             local lin = part.AssemblyLinearVelocity
@@ -1164,9 +1134,7 @@ do
             if myRoot and not State.spinEnabled then
                 local lin = myRoot.AssemblyLinearVelocity
                 local ang = myRoot.AssemblyAngularVelocity
-                if ang.Magnitude > 40 then
-                    myRoot.AssemblyAngularVelocity = Vector3.zero
-                end
+                if ang.Magnitude > 40 then myRoot.AssemblyAngularVelocity = Vector3.zero end
                 if lin.Magnitude > 165 and not State.flyEnabled then
                     zeroVelocity(myChar)
                     if lastSafeCF then myChar:PivotTo(lastSafeCF) end
@@ -1178,7 +1146,6 @@ do
             end
         end
 
-        -- 2. Noclip (проход сквозь стены; при Fling отключаем для вращения)
         if (State.noclip or State.flyEnabled) and myChar and not State.flingEnabled then
             for _, part in ipairs(myChar:GetDescendants()) do
                 if part:IsA("BasePart") and part.CanCollide then
@@ -1188,18 +1155,14 @@ do
             end
         end
 
-        -- 3. Speed & Jump
         if myHum and myHum.Health > 0 then
-            if State.speedEnabled then
-                myHum.WalkSpeed = State.walkSpeed
-            end
+            if State.speedEnabled then myHum.WalkSpeed = State.walkSpeed end
             if State.jumpEnabled then
                 myHum.UseJumpPower = true
                 myHum.JumpPower = State.jumpPower
             end
         end
 
-        -- 4. Spin (крутилка персонажа)
         if myRoot and myHum then
             if State.spinEnabled and not State.flingEnabled then
                 myHum.AutoRotate = false
@@ -1217,7 +1180,6 @@ do
             end
         end
 
-        -- 5. Fling (бешеное вращение для отбрасывания игроков)
         if myRoot and myHum then
             if State.flingEnabled then
                 restoreOtherCollisions()
@@ -1242,7 +1204,6 @@ do
             end
         end
 
-        -- 6. Fly (полёт по направлению камеры + WASD / джойстик + Пробел / Shift)
         if myRoot and myHum then
             if State.flyEnabled then
                 myHum.PlatformStand = true
@@ -1291,7 +1252,6 @@ do
             end
         end
 
-        -- 7. Anti-Void
         if myRoot and myHum and myHum.Health > 0 then
             local fallY = -450
             pcall(function()
@@ -1319,14 +1279,12 @@ do
     end)
 
     F.onCleanup(function()
-        restoreOtherCollisions()
-        restoreNoclip()
-        cleanupFly()
-        cleanupSpin()
-        cleanupFling()
+        restoreOtherCollisions(); restoreNoclip()
+        cleanupFly(); cleanupSpin(); cleanupFling()
         restoreSpeedJump()
     end)
 end
+
 ----------------------------------------------------------------------
 -- МОДУЛЬ 2: МИРОВЫЕ ВИЗУАЛЫ (PLAYER ESP/CHAMS, TRAIL, FOV)
 ----------------------------------------------------------------------
@@ -1419,14 +1377,8 @@ do
         activeTrail.Color = ColorSequence.new(col)
     end
 
-    F.bindState("espPlayers", function(v)
-        if not v then clearAllESP() end
-    end)
-
-    F.bindState("trailEnabled", function(v)
-        if not v then cleanupTrail() end
-    end)
-
+    F.bindState("espPlayers", function(v) if not v then clearAllESP() end end)
+    F.bindState("trailEnabled", function(v) if not v then cleanupTrail() end end)
     F.bindState("fovEnabled", function(v)
         local cam = workspace.CurrentCamera
         if cam and not v then cam.FieldOfView = origFov end
@@ -1436,24 +1388,15 @@ do
 
     F.bind(RunService.RenderStepped, function()
         if State.espPlayers then
-            for _, plr in ipairs(Players:GetPlayers()) do
-                syncPlayerESP(plr)
-            end
+            for _, plr in ipairs(Players:GetPlayers()) do syncPlayerESP(plr) end
         end
-
-        if State.trailEnabled then
-            ensureTrail(LocalPlayer.Character)
-        end
-
+        if State.trailEnabled then ensureTrail(LocalPlayer.Character) end
         local cam = workspace.CurrentCamera
-        if cam and State.fovEnabled then
-            cam.FieldOfView = State.fovValue
-        end
+        if cam and State.fovEnabled then cam.FieldOfView = State.fovValue end
     end)
 
     F.onCleanup(function()
-        clearAllESP()
-        cleanupTrail()
+        clearAllESP(); cleanupTrail()
         local cam = workspace.CurrentCamera
         if cam then cam.FieldOfView = origFov end
     end)
@@ -1981,7 +1924,6 @@ function F.BuildVisualPage(page, isWinOpenFn)
     local L = F.newColumn(s, LX, 90, COLW)
     local R = F.newColumn(s, RX, 90, COLW)
 
-    -- ЛЕВАЯ КОЛОНКА: 3D Бекон + Чамсы + Шейдеры
     L:header("3D Предпросмотр", "eye", "Бекон + Каса")
     local preview = F.BuildBaconPreview(L.holder, 0, L.y, COLW, 306, isWinOpenFn)
     L.y = L.y + 314
@@ -2024,7 +1966,6 @@ function F.BuildVisualPage(page, isWinOpenFn)
         F.toast("Шейдеры сброшены к оригиналу", "undo")
     end, { sep = false })
 
-    -- ПРАВАЯ КОЛОНКА: Визуалы в мире + Самурайская шляпа + Превью
     R:header("Визуалы в мире", "sparkle", "ESP / Trail / FOV")
     R:toggle("espPlayers", "Подсветка игроков (Chams)", "Сквозь стены подсвечивает всех игроков на карте", function(v)
         F.toast(v and "Подсветка игроков включена" or "Подсветка игроков выключена", "eye")
@@ -2083,7 +2024,6 @@ function F.BuildMovementPage(page)
     local L = F.newColumn(s, LX, 90, COLW)
     local R = F.newColumn(s, RX, 90, COLW)
 
-    -- ЛЕВАЯ КОЛОНКА: Полёт, Ноуклип, Скорость, Прыжок
     L:header("Полёт и Ноуклип", "feather", "WASD + Space/Shift")
     L:toggle("flyEnabled", "Полёт (Fly)", "Свободный полёт по направлению камеры (включает ноуклип)", function(v)
         F.toast(v and "Полёт включён" or "Полёт выключен", "feather")
@@ -2108,7 +2048,6 @@ function F.BuildMovementPage(page)
         F.toast(v and "Бесконечные прыжки включены" or "Бесконечные прыжки выключены", "bolt")
     end, { sep = false })
 
-    -- ПРАВАЯ КОЛОНКА: Spin, Fling и Защита от флинга
     R:header("Spin и Fling", "spin", "Вращение")
     R:toggle("spinEnabled", "Спин (Spin)", "Быстрое вращение персонажа вокруг своей оси", function(v)
         F.toast(v and "Спин включён" or "Спин выключен", "spin")
@@ -2534,7 +2473,6 @@ local function BuildShell()
     end
     F.Frame(body, { Position = off(0, HEAD_H - 1), Size = off(WIN_W, 1), BackgroundTransparency = 0.92 })
 
-    -- Боковая панель (3 вкладки: Визуал, Движение, Конфиги)
     local side = F.Frame(body, { Name = "Sidebar", BackgroundTransparency = 1, Position = off(0, HEAD_H), Size = off(SIDE_W, PAGE_H) })
     F.Frame(body, { Position = off(SIDE_W - 1, HEAD_H), Size = off(1, PAGE_H), BackgroundTransparency = 0.93 })
     F.Label(side, { Position = off(20, PAGE_H - 36), Size = off(150, 14), Text = "FINIS VISUAL  ·  v2.4", TextSize = 9.5, TextColor3 = C.txt4 })
@@ -2900,7 +2838,7 @@ local function BuildShell()
                 local cph, sph = math.cos(sp.phi), math.sin(sp.phi)
                 sp.f.Position = off(sp.cx + x*cph - y*sph, sp.cy + x*sph + y*cph)
                 local k = 0.65 + 0.35 * math.sin(now * 3.2 + sp.th * 2)
-                sp.f.Size = off(sp.s * k, sp.s * k
+                sp.f.Size = off(sp.s * k, sp.s * k)
             end
         end
         if winOpen then
