@@ -1,5 +1,6 @@
 --[[
-    Finis Visual v2.3 — 3D-интро "F" + 3D-Бекон + Самурайская шляпа + Шейдеры
+    Finis Visual v2.4 — 3D-интро "F" + 3D-Бекон + Самурайская шляпа + Шейдеры
+    + Визуалы игрока (Chams / Trail / FOV) + Движение (Fly, Noclip, Spin, Fling, Speed, Jump, InfJump)
     + Островок статуса + Защита от флинга (Anti-Fling / Anti-Void) + Конфиги
     Ключ для входа: @FinisOkek (регистр не важен)
 ]]
@@ -17,7 +18,6 @@ local HttpService      = game:GetService("HttpService")
 local LocalPlayer = Players.LocalPlayer
 local ENV = (type(getgenv) == "function" and getgenv()) or _G
 
--- удаляем старую копию при перезапуске
 if ENV.__FinisVisual and type(ENV.__FinisVisual.Destroy) == "function" then
     pcall(ENV.__FinisVisual.Destroy)
 end
@@ -25,7 +25,6 @@ if ENV.__EtaMenu and type(ENV.__EtaMenu.Destroy) == "function" then
     pcall(ENV.__EtaMenu.Destroy)
 end
 
--- общая таблица состояния и модулей (исключает переполнение upvalues)
 local F = {
     conns       = {},
     cleanups    = {},
@@ -137,18 +136,26 @@ local PALETTE = {
 }
 F.PALETTE = PALETTE
 
--- значения по умолчанию (шляпа выкл., островок и защита от флинга вкл.)
 local DEFAULT_STATE = {
     -- оформление 3D-превью Бекона
     prevBox      = true,
     prevNick     = true,
     prevDist     = true,
     prevHealth   = true,
-    chamsMode    = 1, -- 1=Обычный, 2=Glow, 3=Flat, 4=Glass
+    chamsMode    = 1,
     chamsTrans   = 25,
     prevColorIdx = 2,
 
-    -- косметическая самурайская шляпа (выключена при запуске)
+    -- дополнительные визуалы в мире
+    espPlayers   = false,
+    espColorIdx  = 2,
+    trailEnabled = false,
+    trailRgb     = true,
+    trailColorIdx= 3,
+    fovEnabled   = false,
+    fovValue     = 90,
+
+    -- косметическая самурайская шляпа
     hatEnabled   = false,
     hatRgb       = false,
     hatSize      = 1.25,
@@ -169,6 +176,20 @@ local DEFAULT_STATE = {
     shBright     = 2.0,
     shBlur       = 0,
 
+    -- движение и физика
+    flyEnabled   = false,
+    flySpeed     = 65,
+    noclip       = false,
+    speedEnabled = false,
+    walkSpeed    = 32,
+    jumpEnabled  = false,
+    jumpPower    = 80,
+    infJump      = false,
+    spinEnabled  = false,
+    spinSpeed    = 25,
+    flingEnabled = false,
+    flingPower   = 15000,
+
     -- защита от флинга
     antiFling    = true,
     antiVoid     = true,
@@ -185,8 +206,10 @@ local State = {}
 for k, v in pairs(DEFAULT_STATE) do State[k] = v end
 F.State = State
 
-function F.getPrevColor() return PALETTE[State.prevColorIdx] or PALETTE[2] end
-function F.getHatColor()  return PALETTE[State.hatColorIdx]  or PALETTE[1] end
+function F.getPrevColor()  return PALETTE[State.prevColorIdx]  or PALETTE[2] end
+function F.getHatColor()   return PALETTE[State.hatColorIdx]   or PALETTE[1] end
+function F.getEspColor()   return PALETTE[State.espColorIdx]   or PALETTE[2] end
+function F.getTrailColor() return PALETTE[State.trailColorIdx] or PALETTE[3] end
 
 function F.bindState(key, fn)
     F.binders[key] = F.binders[key] or {}
@@ -341,7 +364,6 @@ function F.measureH(text, size, font, w)
     return math.ceil((utf8.len(text) or #text) * size * 0.58 / w) * size * 1.25
 end
 
--- единое перетаскивание
 F.Drag = { move = nil, finish = nil }
 function F.beginDrag(move, finish)
     if F.Drag.finish then pcall(F.Drag.finish) end
@@ -368,7 +390,7 @@ function F.isPress(input)
 end
 
 ----------------------------------------------------------------------
--- СИСТЕМА КОНФИГОВ И АВТОСОХРАНЕНИЯ (ФАЙЛЫ + РЕЗЕРВ В ПАМЯТИ)
+-- СИСТЕМА КОНФИГОВ И АВТОСОХРАНЕНИЯ
 ----------------------------------------------------------------------
 do
     local CFG_DIR = "FinisVisualConfigs"
@@ -555,6 +577,9 @@ do
         target    = { {"c",12,12,9.5}, {"c",12,12,5.5}, {"d",12,12,1.6} },
         hat       = { {"p",true, 12,5, 22,16, 2,16}, {"l",1,16.5,23,16.5} },
         sun       = { {"c",12,12,4.5}, {"l",12,2,12,5}, {"l",12,19,12,22}, {"l",2,12,5,12}, {"l",19,12,22,12}, {"l",5,5,7.2,7.2}, {"l",16.8,16.8,19,19}, {"l",19,5,16.8,7.2}, {"l",7.2,16.8,5,19} },
+        bolt      = { {"p",true, 13,2, 4,14, 11.5,14, 10.5,22, 20,10, 12.5,10} },
+        feather   = { {"p",true, 20,4, 13,4, 5,12, 4,20, 12,19, 20,11}, {"l",4,20,16,8} },
+        spin      = { {"c",12,12,8}, {"p",false, 12,4, 16,7, 12,10} },
         dot       = { {"d",12,12,3} },
     }
 
@@ -857,7 +882,6 @@ do
         return root, box, stroke, ic
     end
 
-    -- колонка-конструктор
     local Column = {}
     Column.__index = Column
 
@@ -976,13 +1000,24 @@ do
         return r
     end
 end
+
 ----------------------------------------------------------------------
--- МОДУЛЬ 1: ЗАЩИТА ОТ ФЛИНГА (ANTI-FLING + ANTI-VOID)
+-- МОДУЛЬ 1: ЗАЩИТА ОТ ФЛИНГА + ДВИЖЕНИЕ (FLY, NOCLIP, SPIN, FLING, SPEED, JUMP, INFJUMP)
 ----------------------------------------------------------------------
 do
     local lastSafeCF = nil
     local lastAlert = 0
     local touchedParts = setmetatable({}, { __mode = "k" })
+    local noclipCache = setmetatable({}, { __mode = "k" })
+
+    local flyBV, flyBG = nil, nil
+    local spinBAV = nil
+    local flingBAV = nil
+
+    local origWalkSpeed = 16
+    local origJumpPower = 50
+    local origJumpHeight = 7.2
+    local origUseJumpPower = true
 
     local function restoreOtherCollisions()
         for part, origCanCollide in pairs(touchedParts) do
@@ -991,6 +1026,15 @@ do
             end
         end
         table.clear(touchedParts)
+    end
+
+    local function restoreNoclip()
+        for part, orig in pairs(noclipCache) do
+            if part and part.Parent then
+                pcall(function() part.CanCollide = orig end)
+            end
+        end
+        table.clear(noclipCache)
     end
 
     local function zeroVelocity(char)
@@ -1004,8 +1048,89 @@ do
         end
     end
 
+    local function cleanupFly()
+        if flyBV then pcall(function() flyBV:Destroy() end); flyBV = nil end
+        if flyBG then pcall(function() flyBG:Destroy() end); flyBG = nil end
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then hum.PlatformStand = false end
+    end
+
+    local function cleanupSpin()
+        if spinBAV then pcall(function() spinBAV:Destroy() end); spinBAV = nil end
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then hum.AutoRotate = true end
+    end
+
+    local function cleanupFling()
+        if flingBAV then pcall(function() flingBAV:Destroy() end); flingBAV = nil end
+        local char = LocalPlayer.Character
+        if char then zeroVelocity(char) end
+    end
+
+    local function restoreSpeedJump()
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            if not State.speedEnabled then hum.WalkSpeed = origWalkSpeed end
+            if not State.jumpEnabled then
+                if hum.UseJumpPower then hum.JumpPower = origJumpPower
+                else hum.JumpHeight = origJumpHeight end
+            end
+        end
+    end
+
     F.bindState("antiFling", function(v)
         if not v then restoreOtherCollisions() end
+    end)
+    F.bindState("noclip", function(v)
+        if not v then restoreNoclip() end
+    end)
+    F.bindState("flyEnabled", function(v)
+        if not v then cleanupFly() end
+    end)
+    F.bindState("spinEnabled", function(v)
+        if not v then cleanupSpin() end
+    end)
+    F.bindState("flingEnabled", function(v)
+        if not v then cleanupFling() end
+    end)
+    F.bindState("speedEnabled", function(v)
+        if not v then restoreSpeedJump() end
+    end)
+    F.bindState("jumpEnabled", function(v)
+        if not v then restoreSpeedJump() end
+    end)
+
+    -- Infinite Jump (работает на земле, в воздухе и в полёте)
+    F.bind(UserInputService.JumpRequest, function()
+        if not State.infJump then return end
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local root = char and (char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso"))
+        if not hum or not root or hum.Health <= 0 then return end
+
+        local jp = State.jumpEnabled and State.jumpPower or (hum.UseJumpPower and hum.JumpPower or 50)
+        if State.flyEnabled then
+            -- рывок вверх прямо во время полёта
+            root.AssemblyLinearVelocity = Vector3.new(root.AssemblyLinearVelocity.X, math.max(jp, 55), root.AssemblyLinearVelocity.Z)
+        else
+            hum:ChangeState(Enum.HumanoidStateType.Jumping)
+            root.AssemblyLinearVelocity = Vector3.new(root.AssemblyLinearVelocity.X, jp, root.AssemblyLinearVelocity.Z)
+        end
+    end)
+
+    F.bind(LocalPlayer.CharacterAdded, function(char)
+        cleanupFly(); cleanupSpin(); cleanupFling()
+        table.clear(noclipCache)
+        local hum = char:WaitForChild("Humanoid", 5)
+        if hum then
+            origWalkSpeed = hum.WalkSpeed
+            origJumpPower = hum.JumpPower
+            origJumpHeight = hum.JumpHeight
+            origUseJumpPower = hum.UseJumpPower
+        end
     end)
 
     F.bind(RunService.Stepped, function()
@@ -1013,8 +1138,8 @@ do
         local myRoot = myChar and (myChar:FindFirstChild("HumanoidRootPart") or myChar:FindFirstChild("Torso"))
         local myHum  = myChar and myChar:FindFirstChildOfClass("Humanoid")
 
-        -- 1. Anti-Fling: убираем коллизию с другими игроками и гасим их бешеную скорость
-        if State.antiFling then
+        -- 1. Anti-Fling (не срабатывает если включён наш собственный Fling)
+        if State.antiFling and not State.flingEnabled then
             for _, plr in ipairs(Players:GetPlayers()) do
                 if plr ~= LocalPlayer and plr.Character then
                     for _, part in ipairs(plr.Character:GetDescendants()) do
@@ -1036,18 +1161,15 @@ do
                 end
             end
 
-            -- защита твоего персонажа от резкого раскручивания или отлёта
-            if myRoot then
+            if myRoot and not State.spinEnabled then
                 local lin = myRoot.AssemblyLinearVelocity
                 local ang = myRoot.AssemblyAngularVelocity
                 if ang.Magnitude > 40 then
                     myRoot.AssemblyAngularVelocity = Vector3.zero
                 end
-                if lin.Magnitude > 145 then
+                if lin.Magnitude > 165 and not State.flyEnabled then
                     zeroVelocity(myChar)
-                    if lastSafeCF then
-                        myChar:PivotTo(lastSafeCF)
-                    end
+                    if lastSafeCF then myChar:PivotTo(lastSafeCF) end
                     if os.clock() - lastAlert > 2 then
                         lastAlert = os.clock()
                         F.toast("Флинг заблокирован", "shield")
@@ -1056,7 +1178,120 @@ do
             end
         end
 
-        -- 2. Запоминаем безопасную позицию и спасаем от вылета за карту (Anti-Void)
+        -- 2. Noclip (проход сквозь стены; при Fling отключаем для вращения)
+        if (State.noclip or State.flyEnabled) and myChar and not State.flingEnabled then
+            for _, part in ipairs(myChar:GetDescendants()) do
+                if part:IsA("BasePart") and part.CanCollide then
+                    if noclipCache[part] == nil then noclipCache[part] = true end
+                    part.CanCollide = false
+                end
+            end
+        end
+
+        -- 3. Speed & Jump
+        if myHum and myHum.Health > 0 then
+            if State.speedEnabled then
+                myHum.WalkSpeed = State.walkSpeed
+            end
+            if State.jumpEnabled then
+                myHum.UseJumpPower = true
+                myHum.JumpPower = State.jumpPower
+            end
+        end
+
+        -- 4. Spin (крутилка персонажа)
+        if myRoot and myHum then
+            if State.spinEnabled and not State.flingEnabled then
+                myHum.AutoRotate = false
+                if not spinBAV or spinBAV.Parent ~= myRoot then
+                    cleanupSpin()
+                    spinBAV = Instance.new("BodyAngularVelocity")
+                    spinBAV.Name = "FinisSpin"
+                    spinBAV.MaxTorque = Vector3.new(0, math.huge, 0)
+                    spinBAV.P = 12500
+                    spinBAV.Parent = myRoot
+                end
+                spinBAV.AngularVelocity = Vector3.new(0, State.spinSpeed, 0)
+            elseif spinBAV then
+                cleanupSpin()
+            end
+        end
+
+        -- 5. Fling (бешеное вращение для отбрасывания игроков)
+        if myRoot and myHum then
+            if State.flingEnabled then
+                restoreOtherCollisions()
+                for _, part in ipairs(myChar:GetDescendants()) do
+                    if part:IsA("BasePart") then
+                        part.CanCollide = true
+                        part.CustomPhysicalProperties = PhysicalProperties.new(100, 0.3, 0.5)
+                    end
+                end
+                if not flingBAV or flingBAV.Parent ~= myRoot then
+                    cleanupFling()
+                    flingBAV = Instance.new("BodyAngularVelocity")
+                    flingBAV.Name = "FinisFling"
+                    flingBAV.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+                    flingBAV.P = math.huge
+                    flingBAV.Parent = myRoot
+                end
+                local pwr = State.flingPower
+                flingBAV.AngularVelocity = Vector3.new(pwr, pwr, pwr)
+            elseif flingBAV then
+                cleanupFling()
+            end
+        end
+
+        -- 6. Fly (полёт по направлению камеры + WASD / джойстик + Пробел / Shift)
+        if myRoot and myHum then
+            if State.flyEnabled then
+                myHum.PlatformStand = true
+                if not flyBV or flyBV.Parent ~= myRoot then
+                    cleanupFly()
+                    flyBV = Instance.new("BodyVelocity")
+                    flyBV.Name = "FinisFlyVel"
+                    flyBV.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+                    flyBV.Velocity = Vector3.zero
+                    flyBV.Parent = myRoot
+
+                    flyBG = Instance.new("BodyGyro")
+                    flyBG.Name = "FinisFlyGyro"
+                    flyBG.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+                    flyBG.P = 90000
+                    flyBG.D = 1200
+                    flyBG.CFrame = myRoot.CFrame
+                    flyBG.Parent = myRoot
+                end
+
+                local cam = workspace.CurrentCamera
+                if cam then
+                    local moveDir = myHum.MoveDirection
+                    local forward = cam.CFrame.LookVector
+                    local right = cam.CFrame.RightVector
+                    local flatForward = Vector3.new(forward.X, 0, forward.Z)
+                    if flatForward.Magnitude > 0.001 then flatForward = flatForward.Unit end
+                    local flatRight = Vector3.new(right.X, 0, right.Z)
+                    if flatRight.Magnitude > 0.001 then flatRight = flatRight.Unit end
+
+                    local fwdInput = moveDir:Dot(flatForward)
+                    local rightInput = moveDir:Dot(flatRight)
+                    local upInput = 0
+                    if UserInputService:IsKeyDown(Enum.KeyCode.Space) then upInput = upInput + 1 end
+                    if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+                        upInput = upInput - 1
+                    end
+
+                    local wish = (forward * fwdInput) + (right * rightInput) + Vector3.new(0, upInput, 0)
+                    if wish.Magnitude > 1 then wish = wish.Unit end
+                    flyBV.Velocity = wish * State.flySpeed
+                    flyBG.CFrame = cam.CFrame
+                end
+            elseif flyBV then
+                cleanupFly()
+            end
+        end
+
+        -- 7. Anti-Void
         if myRoot and myHum and myHum.Health > 0 then
             local fallY = -450
             pcall(function()
@@ -1083,11 +1318,149 @@ do
         end
     end)
 
-    F.onCleanup(restoreOtherCollisions)
+    F.onCleanup(function()
+        restoreOtherCollisions()
+        restoreNoclip()
+        cleanupFly()
+        cleanupSpin()
+        cleanupFling()
+        restoreSpeedJump()
+    end)
+end
+----------------------------------------------------------------------
+-- МОДУЛЬ 2: МИРОВЫЕ ВИЗУАЛЫ (PLAYER ESP/CHAMS, TRAIL, FOV)
+----------------------------------------------------------------------
+do
+    local espHighlights = {}
+    local activeTrail, trailAtt0, trailAtt1 = nil, nil, nil
+    local origFov = 70
+    pcall(function()
+        if workspace.CurrentCamera then origFov = workspace.CurrentCamera.FieldOfView end
+    end)
+
+    local function clearPlayerESP(plr)
+        local hl = espHighlights[plr]
+        if hl then pcall(function() hl:Destroy() end) end
+        espHighlights[plr] = nil
+    end
+
+    local function clearAllESP()
+        for plr in pairs(espHighlights) do clearPlayerESP(plr) end
+    end
+
+    local function syncPlayerESP(plr)
+        if plr == LocalPlayer then return end
+        if not State.espPlayers then clearPlayerESP(plr); return end
+        local char = plr.Character
+        if not char then clearPlayerESP(plr); return end
+
+        local hl = espHighlights[plr]
+        if not hl or not hl.Parent or hl.Adornee ~= char then
+            clearPlayerESP(plr)
+            hl = Instance.new("Highlight")
+            hl.Name = "FinisPlayerESP"
+            hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            hl.Adornee = char
+            hl.Parent = gui
+            espHighlights[plr] = hl
+        end
+        local col = F.getEspColor()
+        hl.FillColor = col
+        hl.OutlineColor = Color3.new(1, 1, 1)
+        hl.FillTransparency = 0.55
+        hl.OutlineTransparency = 0.1
+    end
+
+    local function cleanupTrail()
+        if activeTrail then pcall(function() activeTrail:Destroy() end); activeTrail = nil end
+        if trailAtt0 then pcall(function() trailAtt0:Destroy() end); trailAtt0 = nil end
+        if trailAtt1 then pcall(function() trailAtt1:Destroy() end); trailAtt1 = nil end
+    end
+
+    local function ensureTrail(char)
+        if not State.trailEnabled or not char then cleanupTrail(); return end
+        local root = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso")
+        if not root then return end
+
+        if not activeTrail or not activeTrail.Parent or trailAtt0.Parent ~= root then
+            cleanupTrail()
+            trailAtt0 = Instance.new("Attachment")
+            trailAtt0.Name = "FinisTrailA0"
+            trailAtt0.Position = Vector3.new(0, 1.4, 0)
+            trailAtt0.Parent = root
+
+            trailAtt1 = Instance.new("Attachment")
+            trailAtt1.Name = "FinisTrailA1"
+            trailAtt1.Position = Vector3.new(0, -1.4, 0)
+            trailAtt1.Parent = root
+
+            activeTrail = Instance.new("Trail")
+            activeTrail.Name = "FinisPlayerTrail"
+            activeTrail.Attachment0 = trailAtt0
+            activeTrail.Attachment1 = trailAtt1
+            activeTrail.Lifetime = 0.65
+            activeTrail.MinLength = 0.05
+            activeTrail.FaceCamera = true
+            activeTrail.LightEmission = 1
+            activeTrail.Transparency = NumberSequence.new({
+                NumberSequenceKeypoint.new(0, 0.15),
+                NumberSequenceKeypoint.new(1, 1),
+            })
+            activeTrail.WidthScale = NumberSequence.new({
+                NumberSequenceKeypoint.new(0, 1),
+                NumberSequenceKeypoint.new(1, 0.1),
+            })
+            activeTrail.Parent = root
+        end
+
+        local col = State.trailRgb
+            and Color3.fromHSV((os.clock() * 0.35) % 1, 0.9, 1)
+            or F.getTrailColor()
+        activeTrail.Color = ColorSequence.new(col)
+    end
+
+    F.bindState("espPlayers", function(v)
+        if not v then clearAllESP() end
+    end)
+
+    F.bindState("trailEnabled", function(v)
+        if not v then cleanupTrail() end
+    end)
+
+    F.bindState("fovEnabled", function(v)
+        local cam = workspace.CurrentCamera
+        if cam and not v then cam.FieldOfView = origFov end
+    end)
+
+    F.bind(Players.PlayerRemoving, clearPlayerESP)
+
+    F.bind(RunService.RenderStepped, function()
+        if State.espPlayers then
+            for _, plr in ipairs(Players:GetPlayers()) do
+                syncPlayerESP(plr)
+            end
+        end
+
+        if State.trailEnabled then
+            ensureTrail(LocalPlayer.Character)
+        end
+
+        local cam = workspace.CurrentCamera
+        if cam and State.fovEnabled then
+            cam.FieldOfView = State.fovValue
+        end
+    end)
+
+    F.onCleanup(function()
+        clearAllESP()
+        cleanupTrail()
+        local cam = workspace.CurrentCamera
+        if cam then cam.FieldOfView = origFov end
+    end)
 end
 
 ----------------------------------------------------------------------
--- МОДУЛЬ 2: КОСМЕТИЧЕСКАЯ САМУРАЙСКАЯ ШЛЯПА (КАСА)
+-- МОДУЛЬ 3: КОСМЕТИЧЕСКАЯ САМУРАЙСКАЯ ШЛЯПА (КАСА)
 ----------------------------------------------------------------------
 do
     local HAT_LAYERS = 13
@@ -1152,7 +1525,7 @@ do
 end
 
 ----------------------------------------------------------------------
--- МОДУЛЬ 3: ШЕЙДЕРЫ (LIGHTING + 8 ПРЕСЕТОВ)
+-- МОДУЛЬ 4: ШЕЙДЕРЫ (LIGHTING + 8 ПРЕСЕТОВ)
 ----------------------------------------------------------------------
 do
     local Orig = {
@@ -1288,7 +1661,7 @@ do
 end
 
 ----------------------------------------------------------------------
--- МОДУЛЬ 4: 3D-ПРЕВЬЮ БЕКОНА (ЧАМСЫ НА ВСЁ ТЕЛО + ШЛЯПА КАСА)
+-- МОДУЛЬ 5: 3D-ПРЕВЬЮ БЕКОНА
 ----------------------------------------------------------------------
 function F.BuildBaconPreview(parent, x, y, w, h, isWinOpenFn)
     local card = F.Frame(parent, {
@@ -1524,7 +1897,7 @@ function F.BuildBaconPreview(parent, x, y, w, h, isWinOpenFn)
 end
 
 ----------------------------------------------------------------------
--- МОДУЛЬ 5: ОСТРОВОК СТАТУСА (ВКЛЮЧЁН ПО УМОЛЧАНИЮ)
+-- МОДУЛЬ 6: ОСТРОВОК СТАТУСА
 ----------------------------------------------------------------------
 function F.BuildStatusIsland()
     local island = F.Frame(gui, {
@@ -1553,7 +1926,6 @@ function F.BuildStatusIsland()
     local timeLbl = F.Label(island, { Position = off(214, 0), Size = off(62, 34), Text = "00:00", TextSize = 12.5, Font = F.FONT_M, TextColor3 = C.txt2 })
     F.Frame(island, { AnchorPoint = V2(0, 0.5), Position = off(276, 17), Size = off(1, 14), BackgroundTransparency = 0.82 })
 
-    -- индикатор щита Anti-Fling на островке
     local shieldIc = F.Icon(island, "shield", 15, State.antiFling and C.green or C.txt4, { Position = off(290, 9.5) })
     F.bindState("antiFling", function(v, instant)
         F.setIconColor(shieldIc, v and C.green or C.txt4, instant)
@@ -1598,12 +1970,12 @@ function F.BuildStatusIsland()
 end
 
 ----------------------------------------------------------------------
--- ВКЛАДКА 1: ВИЗУАЛ (3D-БЕКОН + ШЛЯПА КАСА + ШЕЙДЕРЫ)
+-- ВКЛАДКА 1: ВИЗУАЛ (3D-БЕКОН + МИРОВЫЕ ВИЗУАЛЫ + ШЛЯПА + ШЕЙДЕРЫ)
 ----------------------------------------------------------------------
 function F.BuildVisualPage(page, isWinOpenFn)
     local s = page.scroller
     F.Label(s, { Position = off(26, 12), Size = off(420, 38), Text = "Визуал", TextSize = 28, Font = F.FONT_B, TextColor3 = rgb(236, 230, 255) })
-    F.Label(s, { Position = off(26, 50), Size = off(520, 22), Text = "3D-превью Бекона, самурайская шляпа (Каса) и шейдеры", TextSize = 13.5, TextColor3 = C.txt2 })
+    F.Label(s, { Position = off(26, 50), Size = off(580, 22), Text = "3D-превью Бекона, подсветка игроков, неоновый шлейф, FOV и шейдеры", TextSize = 13.5, TextColor3 = C.txt2 })
 
     local LX, RX, COLW = 26, 422, 372
     local L = F.newColumn(s, LX, 90, COLW)
@@ -1652,9 +2024,24 @@ function F.BuildVisualPage(page, isWinOpenFn)
         F.toast("Шейдеры сброшены к оригиналу", "undo")
     end, { sep = false })
 
-    -- ПРАВАЯ КОЛОНКА: Самурайская шляпа (Каса) + Визуал превью Бекона
-    R:header("Самурайская шляпа (Каса)", "hat", "На голове + 3D")
-    R:toggle("hatEnabled", "Включить шляпу", "Коническая самурайская шляпа (выкл. по умолчанию)")
+    -- ПРАВАЯ КОЛОНКА: Визуалы в мире + Самурайская шляпа + Превью
+    R:header("Визуалы в мире", "sparkle", "ESP / Trail / FOV")
+    R:toggle("espPlayers", "Подсветка игроков (Chams)", "Сквозь стены подсвечивает всех игроков на карте", function(v)
+        F.toast(v and "Подсветка игроков включена" or "Подсветка игроков выключена", "eye")
+    end)
+    R:palette("espColorIdx", "Цвет подсветки игроков", State.espColorIdx, function(i) State.espColorIdx = i end)
+    R:toggle("trailEnabled", "Неоновый шлейф (Trail)", "Светящаяся лента за персонажем при движении", function(v)
+        F.toast(v and "Неоновый шлейф включён" or "Неоновый шлейф выключен", "sparkle")
+    end)
+    R:toggle("trailRgb", "Радужный шлейф (RGB)", "Плавный перелив цветов шлейфа")
+    R:palette("trailColorIdx", "Цвет шлейфа (без RGB)", State.trailColorIdx, function(i) State.trailColorIdx = i end)
+    R:toggle("fovEnabled", "Кастомный угол обзора (FOV)", "Расширяет обзор камеры")
+    R:slider("fovValue", "Угол обзора камеры", nil, {
+        min = 50, max = 120, step = 1, fmt = function(v) return string.format("%d°", v) end,
+    })
+
+    R:header("Самурайская шляпа (Каса)", "hat", "На голове + 3D", 14)
+    R:toggle("hatEnabled", "Включить шляпу", "Коническая самурайская шляпа")
     R:toggle("hatRgb", "Радуга (RGB)", "Плавный перелив всех цветов")
     R:slider("hatSize", "Размер шляпы", "Ширина полей и высота конуса", {
         min = 0.5, max = 3.0, step = 0.05, fmt = function(v) return string.format("%.2fx", v) end,
@@ -1685,25 +2072,79 @@ function F.BuildVisualPage(page, isWinOpenFn)
 end
 
 ----------------------------------------------------------------------
--- ВКЛАДКА 2: МЕНЮ, ЗАЩИТА ОТ ФЛИНГА И КОНФИГИ
+-- ВКЛАДКА 2: ДВИЖЕНИЕ (FLY, NOCLIP, SPEED, JUMP, INFJUMP, SPIN, FLING)
 ----------------------------------------------------------------------
-function F.BuildConfigPage(page)
+function F.BuildMovementPage(page)
     local s = page.scroller
-    F.Label(s, { Position = off(26, 12), Size = off(480, 38), Text = "Меню и Конфиги", TextSize = 28, Font = F.FONT_B, TextColor3 = rgb(236, 230, 255) })
-    F.Label(s, { Position = off(26, 50), Size = off(580, 22), Text = "Защита от флинга, островок статуса, размер интерфейса и конфиги", TextSize = 13.5, TextColor3 = C.txt2 })
+    F.Label(s, { Position = off(26, 12), Size = off(480, 38), Text = "Движение и Физика", TextSize = 28, Font = F.FONT_B, TextColor3 = rgb(236, 230, 255) })
+    F.Label(s, { Position = off(26, 50), Size = off(600, 22), Text = "Полёт, ноуклип, скорость, прыжок, бесконечные прыжки, спин и флинг", TextSize = 13.5, TextColor3 = C.txt2 })
 
     local LX, RX, COLW = 26, 422, 372
     local L = F.newColumn(s, LX, 90, COLW)
     local R = F.newColumn(s, RX, 90, COLW)
 
-    -- ЛЕВАЯ КОЛОНКА: Защита от флинга + Размер меню + Островок + Автосохранение
-    L:header("Защита от флинга", "shield", "Активна")
-    L:toggle("antiFling", "Защита от флинга", "Убирает столкновения с игроками и гасит чужие удары", function(v)
+    -- ЛЕВАЯ КОЛОНКА: Полёт, Ноуклип, Скорость, Прыжок
+    L:header("Полёт и Ноуклип", "feather", "WASD + Space/Shift")
+    L:toggle("flyEnabled", "Полёт (Fly)", "Свободный полёт по направлению камеры (включает ноуклип)", function(v)
+        F.toast(v and "Полёт включён" or "Полёт выключен", "feather")
+    end)
+    L:slider("flySpeed", "Скорость полёта", nil, {
+        min = 10, max = 250, step = 5, fmt = function(v) return string.format("%d", v) end,
+    })
+    L:toggle("noclip", "Ноуклип (Noclip)", "Прохождение сквозь любые стены и препятствия", function(v)
+        F.toast(v and "Ноуклип включён" or "Ноуклип выключен", "feather")
+    end)
+
+    L:header("Скорость и Прыжки", "bolt", "Увеличить / уменьшить", 14)
+    L:toggle("speedEnabled", "Изменить скорость бега", "Заменяет стандартную скорость персонажа (16)")
+    L:slider("walkSpeed", "Скорость бега", "От медленной ходьбы (4) до спринта (200)", {
+        min = 4, max = 200, step = 1, fmt = function(v) return string.format("%d", v) end,
+    })
+    L:toggle("jumpEnabled", "Изменить силу прыжка", "Заменяет стандартную высоту прыжка (50)")
+    L:slider("jumpPower", "Сила прыжка", "От низкого подскока (10) до суперпрыжка (250)", {
+        min = 10, max = 250, step = 5, fmt = function(v) return string.format("%d", v) end,
+    })
+    L:toggle("infJump", "Бесконечные прыжки (Inf Jump)", "Прыгай в воздухе и прямо во время полёта по пробелу", function(v)
+        F.toast(v and "Бесконечные прыжки включены" or "Бесконечные прыжки выключены", "bolt")
+    end, { sep = false })
+
+    -- ПРАВАЯ КОЛОНКА: Spin, Fling и Защита от флинга
+    R:header("Spin и Fling", "spin", "Вращение")
+    R:toggle("spinEnabled", "Спин (Spin)", "Быстрое вращение персонажа вокруг своей оси", function(v)
+        F.toast(v and "Спин включён" or "Спин выключен", "spin")
+    end)
+    R:slider("spinSpeed", "Скорость спина", nil, {
+        min = 5, max = 120, step = 5, fmt = function(v) return string.format("%d rad/s", v) end,
+    })
+    R:toggle("flingEnabled", "Флинг (Fling)", "Сверхбыстрое вращение коллизии для отталкивания игроков", function(v)
+        F.toast(v and "Флинг включён — подойди к игроку" or "Флинг выключен", "bolt")
+    end)
+    R:slider("flingPower", "Мощность флинга", nil, {
+        min = 3000, max = 50000, step = 1000, fmt = function(v) return string.format("%d", v) end,
+    })
+
+    R:header("Защита от флинга", "shield", "Активна", 14)
+    R:toggle("antiFling", "Защита от флинга (Anti-Fling)", "Убирает столкновения с игроками и гасит чужие удары", function(v)
         F.toast(v and "Защита от флинга включена" or "Защита от флинга выключена", "shield")
     end)
-    L:toggle("antiVoid", "Защита от падения (Anti-Void)", "Возвращает обратно на карту, если всё-таки вытолкнули")
+    R:toggle("antiVoid", "Защита от падения (Anti-Void)", "Возвращает обратно на карту при падении в бездну", nil, { sep = false })
 
-    L:header("Размер и вид меню", "sliders", "Под любой экран", 12)
+    page.setHeight(math.max(L.y, R.y) + 32)
+end
+
+----------------------------------------------------------------------
+-- ВКЛАДКА 3: МЕНЮ И КОНФИГИ
+----------------------------------------------------------------------
+function F.BuildConfigPage(page)
+    local s = page.scroller
+    F.Label(s, { Position = off(26, 12), Size = off(480, 38), Text = "Меню и Конфиги", TextSize = 28, Font = F.FONT_B, TextColor3 = rgb(236, 230, 255) })
+    F.Label(s, { Position = off(26, 50), Size = off(580, 22), Text = "Островок статуса, размер интерфейса, прозрачность и JSON-профили", TextSize = 13.5, TextColor3 = C.txt2 })
+
+    local LX, RX, COLW = 26, 422, 372
+    local L = F.newColumn(s, LX, 90, COLW)
+    local R = F.newColumn(s, RX, 90, COLW)
+
+    L:header("Размер и вид меню", "sliders", "Под любой экран")
     local sizeVals = { 0.75, 1.0, 1.25 }
     local initPreset = (State.menuScale <= 0.85 and 1) or (State.menuScale >= 1.15 and 3) or 2
     L:segment(nil, "Быстрый размер", { "Маленькое", "Среднее", "Большое" }, initPreset, function(i)
@@ -1743,7 +2184,6 @@ function F.BuildConfigPage(page)
         F.toast("Все настройки сброшены", "undo")
     end, { sep = false })
 
-    -- ПРАВАЯ КОЛОНКА: Менеджер конфигов
     R:header("Создать конфиг", "folder", "JSON профили")
     local nameRow = R:row(58, { sep = false })
     local _, cfgNameBox = F.Input(nameRow, 0, 4, COLW, 46, "pencil", "Название конфига (например: my_cfg)", 14)
@@ -1807,7 +2247,7 @@ function F.BuildConfigPage(page)
 end
 
 ----------------------------------------------------------------------
--- 3D-ИНТРО БУКВЫ "F" (С ЗАЩИТОЙ ОТ СБОЕВ)
+-- 3D-ИНТРО БУКВЫ "F"
 ----------------------------------------------------------------------
 function F.RunIntro3DF(orb, orbScale, getOrbTargetPos)
     local function ensureOrbVisible()
@@ -1935,14 +2375,13 @@ function F.RunIntro3DF(orb, orbScale, getOrbTargetPos)
 end
 
 ----------------------------------------------------------------------
--- ОБОЛОЧКА МЕНЮ (2 ВКЛАДКИ: ВИЗУАЛ + КОНФИГИ)
+-- ОБОЛОЧКА МЕНЮ (3 ВКЛАДКИ: ВИЗУАЛ + ДВИЖЕНИЕ + КОНФИГИ)
 ----------------------------------------------------------------------
 local function BuildShell()
     local Quint, Quad, Back = Enum.EasingStyle.Quint, Enum.EasingStyle.Quad, Enum.EasingStyle.Back
     local Out, In, InOut = Enum.EasingDirection.Out, Enum.EasingDirection.In, Enum.EasingDirection.InOut
     local WIN_W, WIN_H, SIDE_W, HEAD_H, PAGE_W, PAGE_H, CARD_W, CARD_H = 1020, 620, 173, 80, 847, 540, 495, 442
 
-    -- тосты
     local toastHost = F.Frame(gui, { Name = "Toasts", BackgroundTransparency = 1, Size = sc(1, 1), ZIndex = 60 })
     local curToast
     function F.toast(text, iconName)
@@ -1988,7 +2427,6 @@ local function BuildShell()
     end
     F.onCleanup(function() winOpen = false; cardOpen = false; syncTopbar() end)
 
-    -- Шар Orb с логотипом F
     local ORB = 74
     local function getOrbTargetPos()
         local scr = F.viewport()
@@ -2040,7 +2478,6 @@ local function BuildShell()
         end)
     end)
 
-    -- Главное окно
     local winBaseT = (1 - State.panelOpacity / 100) * 0.9 + 0.025
     local win = F.Frame(gui, {
         Name = "Window", AnchorPoint = V2(0.5, 0.5), Position = F.homeCenter(), Size = off(WIN_W, WIN_H),
@@ -2056,7 +2493,6 @@ local function BuildShell()
     local body = F.Frame(win, { Name = "Body", BackgroundTransparency = 1, Size = off(WIN_W, WIN_H), ZIndex = 2 })
     local fx   = F.Frame(win, { Name = "Fx", BackgroundTransparency = 1, Size = off(WIN_W, WIN_H), ZIndex = 30 })
 
-    -- Шапка окна
     local header = F.Frame(body, { Name = "Header", BackgroundTransparency = 1, Size = off(WIN_W, HEAD_H) })
     local headDrag = F.Button(header, { Name = "DragHandle", Size = off(WIN_W, HEAD_H), ZIndex = 1 })
     local hLogo = F.makeLogoF(header, 40, true, true); hLogo.Position = off(14, 19); hLogo.ZIndex = 2
@@ -2098,14 +2534,15 @@ local function BuildShell()
     end
     F.Frame(body, { Position = off(0, HEAD_H - 1), Size = off(WIN_W, 1), BackgroundTransparency = 0.92 })
 
-    -- Боковая панель (2 вкладки: Визуал и Конфиги)
+    -- Боковая панель (3 вкладки: Визуал, Движение, Конфиги)
     local side = F.Frame(body, { Name = "Sidebar", BackgroundTransparency = 1, Position = off(0, HEAD_H), Size = off(SIDE_W, PAGE_H) })
     F.Frame(body, { Position = off(SIDE_W - 1, HEAD_H), Size = off(1, PAGE_H), BackgroundTransparency = 0.93 })
-    F.Label(side, { Position = off(20, PAGE_H - 36), Size = off(150, 14), Text = "FINIS VISUAL  ·  v2.3", TextSize = 9.5, TextColor3 = C.txt4 })
+    F.Label(side, { Position = off(20, PAGE_H - 36), Size = off(150, 14), Text = "FINIS VISUAL  ·  v2.4", TextSize = 9.5, TextColor3 = C.txt4 })
 
     local NAV = {
-        { id = "visual",  title = "Визуал",  icon = "eye" },
-        { id = "configs", title = "Конфиги", icon = "folder" },
+        { id = "visual",   title = "Визуал",   icon = "eye" },
+        { id = "movement", title = "Движение", icon = "bolt" },
+        { id = "configs",  title = "Конфиги",  icon = "folder" },
     }
     local selPill = F.Frame(side, { Position = off(8, 13), Size = off(155, 50), BackgroundTransparency = 0.9 })
     F.Corner(selPill, 16); F.Stroke(selPill, C.white, 0.82, 1)
@@ -2158,7 +2595,6 @@ local function BuildShell()
         b.Activated:Connect(function() if not F.scrolled then switchTab(item.id) end end)
     end
 
-    -- Инерционный скролл
     local function insidePage(pos)
         local a, s_ = pageHost.AbsolutePosition, pageHost.AbsoluteSize
         local inset = GuiService:GetGuiInset()
@@ -2210,13 +2646,12 @@ local function BuildShell()
         else F.scrolled = false end
     end)
 
-    -- Собираем вкладки и применяем сохранённые шейдеры
     table.clear(F.searchItems)
     F.BuildVisualPage(createPage("visual"), function() return winOpen end)
+    F.BuildMovementPage(createPage("movement"))
     F.BuildConfigPage(createPage("configs"))
     F.ApplySavedShaders()
 
-    -- Уголок масштаба + частицы
     local grip = F.Button(body, { Position = off(WIN_W - 34, WIN_H - 34), Size = off(30, 30), ZIndex = 5 })
     for r = 0, 2 do for c = 0, 2 - r do F.Corner(F.Frame(grip, { Position = off(20 - c*6, 20 - r*6), Size = off(2.5, 2.5), BackgroundTransparency = 0.55 }), "full") end end
 
@@ -2320,7 +2755,6 @@ local function BuildShell()
     end
     closeBtn.Activated:Connect(function() if not F.scrolled then closeWindow() end end)
 
-    -- Карточка ввода ключа (@FinisOkek)
     local spinners = {}
     local card = F.Frame(gui, {
         Name = "KeyCard", AnchorPoint = V2(0.5, 0.5), Position = F.homeCenter(), Size = off(CARD_W, CARD_H),
@@ -2344,7 +2778,7 @@ local function BuildShell()
         keyBox.TextTransparency = 1 - a; keyBox.PlaceholderText = (a > 0.6) and "Ваш ключ" or ""
         F.setIconAlpha(inIcon, a)
     end
-    F.Label(cardBody, { Position = off(0, 396), Size = off(CARD_W, 16), Text = "FINIS VISUAL  ·  v2.3", TextSize = 9.5, TextColor3 = C.txt4, TextXAlignment = Enum.TextXAlignment.Center })
+    F.Label(cardBody, { Position = off(0, 396), Size = off(CARD_W, 16), Text = "FINIS VISUAL  ·  v2.4", TextSize = 9.5, TextColor3 = C.txt4, TextXAlignment = Enum.TextXAlignment.Center })
 
     local pasteWrap = F.Group(cardBody, { Position = off(35, 306), Size = off(141, 52) })
     F.MakeButton(pasteWrap, 0, 0, 141, 52, "Вставить", "clipboard", "ghost", function()
@@ -2455,7 +2889,6 @@ local function BuildShell()
         if not gp and input.KeyCode == Enum.KeyCode.RightShift and orb.Visible then F.orbTap() end
     end)
 
-    -- главный цикл (орбита, искры, частицы, инерция скролла)
     F.bind(RunService.Heartbeat, function(dt)
         local now = os.clock()
         arcGrad.Rotation = (now * 240) % 360
@@ -2467,7 +2900,7 @@ local function BuildShell()
                 local cph, sph = math.cos(sp.phi), math.sin(sp.phi)
                 sp.f.Position = off(sp.cx + x*cph - y*sph, sp.cy + x*sph + y*cph)
                 local k = 0.65 + 0.35 * math.sin(now * 3.2 + sp.th * 2)
-                sp.f.Size = off(sp.s * k, sp.s * k)
+                sp.f.Size = off(sp.s * k, sp.s * k
             end
         end
         if winOpen then
